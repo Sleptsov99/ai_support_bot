@@ -1,0 +1,11 @@
+[
+ {"id": "sample-deposit-time", "category": "deposit", "question": "How long does a deposit take?",
+  "answer": "[SAMPLE KB - replace with the real Q&A sheet] Deposit crediting takes from a few minutes up to 24 hours depending on the payment system.",
+  "keywords": ["deposit processing time", "how long deposit", "deposit time"]},
+ {"id": "sample-withdrawal-time", "category": "withdrawal", "question": "How long does a withdrawal take?",
+  "answer": "[SAMPLE KB - replace with the real Q&A sheet] Withdrawal requests are usually processed within 24 hours depending on the payment system.",
+  "keywords": ["withdrawal processing time", "how long withdrawal", "withdrawal time"]},
+ {"id": "sample-forgot-password", "category": "account", "question": "Forgot password",
+  "answer": "[SAMPLE KB - replace with the real Q&A sheet] Use the 'Forgot password?' link on the login form and follow the instructions.",
+  "keywords": ["forgot password", "забыл пароль", "reset password"]}
+]

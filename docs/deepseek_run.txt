@@ -1,0 +1,118 @@
+
+### Модель: deepseek; режим языков: PIVOT_LANGUAGES=(default)
+
+====================================================================================================
+1. Египет, арабский (диалект): депозит не пришёл, прошёл час -> обычный срок, без эскалации
+====================================================================================================
+
+👤 КЛИЕНТ: عملت ايداع من ساعة بفودافون كاش ولسه موصلش
+🤖 БОТ [Partial]: أهلاً بك، أنا سلمى 🌿 الإيداع من فودافون كاش بياخد عادةً من دقيقة لحد 12 ساعة، يعني لسه معاك وقت لحد حوالي 21:28 النهاردة. ممكن تتأكد من حالة التحويل في تطبيق فودافون كاش من سجل العمليات — هل مكتوب "تم بنجاح"؟
+   кнопки: تم بنجاح · فيه خطأ · مش عارف أشوفه
+   [4.3s | тема: deposit | сигнал: new_request | неудач: 0 | язык: ar | персона: Salma]
+   [платёж: deposit, ждёт 1ч, собрано: {'method': 'Vodafone Cash'}, спросили: []]
+
+👤 КЛИЕНТ: طب ليه بياخد وقت كده؟ عايز اكلم حد
+🤖 БОТ [Partial]: أفهم إنك مستعجل، والوقت بيعتمد على نظام الدفع نفسه وضغطه في اللحظة دي — أحياناً بيوصل في دقايق وأحياناً بياخد وقت أطول، عشان كده بنقول المدة بحذر. أنا معاك هنا وهساعدك لحد ما نوصل لحل 🙂 بس محتاجة أعرف حاجة واحدة: هل التحويل في تطبيق فودافون كاش مكتوب عليه "تم بنجاح"؟
+   кнопки: أيوه مكتوب تم بنجاح · لأ فيه خطأ · مش عارف أشوفه فين
+   [8.0s | тема: deposit | сигнал: progress | неудач: 1 | язык: ar | персона: Salma]
+   [платёж: deposit, ждёт 1ч, собрано: {'method': 'Vodafone Cash'}, спросили: []]
+
+👤 КЛИЕНТ: تمام شكرا
+🤖 БОТ [Partial]: العفو 🌿 بس خليني أتطمن: هل سؤالك اتحل؟
+   кнопки: نعم · لا
+   [9.8s | тема: deposit | сигнал: closing | неудач: 1 | язык: ar | персона: Salma]
+   [платёж: deposit, ждёт 1ч, собрано: {'method': 'Vodafone Cash'}, спросили: []]
+
+### Модель: deepseek; режим языков: PIVOT_LANGUAGES=(default)
+
+====================================================================================================
+2. Кения, суахили: не может войти в аккаунт -> ответ из базы, 'не помогло' -> следующая попытка
+====================================================================================================
+
+👤 КЛИЕНТ: Nimesahau nenosiri langu na siwezi kuingia kwenye akaunti
+   ↳ бот прочитал: I have forgotten my password and I cannot log into my account
+🤖 БОТ [Partial]: Habari, mimi ni Brian — nitakusaidia kuingia tena 🙂 Unaweza kutumia namba ya akaunti, simu au barua pepe kuingia. Kwenye skrini ya kuingia, gusa "Umesahau nenosiri" na ulibadilishe kwa simu au barua pepe. Je, umejaribu hilo?
+   кнопки: Bado, nitajaribu · Hakuna msimbo wa kubadilisha · Sina ufikiaji wa simu · Nimejaribu tayari
+   [7.0s | тема: account | сигнал: new_request | неудач: 0 | язык: sw | персона: Brian]
+
+👤 КЛИЕНТ: Bado haifanyi kazi, SMS haifiki
+   ↳ бот прочитал: It still doesn't work, the SMS doesn't arrive
+🤖 БОТ [Partial]: Asante kwa kujaribu. Hebu tuangalie mambo ya msingi: simu yako iko hewani na ina mtandao, na namba iliyo kwenye akaunti yako bado ni ile unayotumia sasa?
+   кнопки: Ndiyo, namba ni ya sasa · Hapana, namba ya zamani · Msimbo bado hauji
+   [6.3s | тема: account | сигнал: progress | неудач: 0 | язык: sw | персона: Brian]
+
+👤 КЛИЕНТ: Sawa, asante sana
+   ↳ бот прочитал: Okay, thank you very much
+🤖 БОТ [Partial]: Nafurahi kusaidia 🙂 Ili nijue — je, msimbo ulifika mwishoni, au bado haufiki?
+   кнопки: Ndiyo · Hapana
+   [5.9s | тема: account | сигнал: closing | неудач: 0 | язык: sw | персона: Brian]
+
+### Модель: deepseek; режим языков: PIVOT_LANGUAGES=(default)
+
+====================================================================================================
+3. Нигерия, английский: депозит не пришёл больше суток -> сбор данных -> передача на L1
+====================================================================================================
+
+👤 КЛИЕНТ: I deposited 5000 naira with my bank card yesterday morning and it's still not in my balance!!
+🤖 БОТ [Partial]: Hi, I'm Samuel — sorry you're dealing with this, a day is way too long to be waiting. I'm collecting the details for a specialist so nothing gets repeated. First: please send a screenshot of the receipt from your banking app itself (not the AvaBet page) — it shows the recipient and the transaction number, which is what they need to trace the payment.
+   кнопки: Sending it now · Can't find the receipt · Paid via another method
+   [4.2s | тема: deposit | сигнал: new_request | неудач: 0 | язык: en | персона: Samuel]
+   [платёж: deposit, ждёт 26ч, собрано: {'method': 'bank card', 'amount': '5000 naira', 'paid_at': 'yesterday morning'}, спросили: ['receipt']]
+
+👤 КЛИЕНТ: Visa card
+🤖 БОТ [Partial]: Thanks, noted — Visa card. Next I need the card number the money was sent from, or the account number it's linked to. The specialist uses it to match your transfer on the bank side.
+   кнопки: Card number · Account number · Not sure which one
+   [3.7s | тема: deposit | сигнал: progress | неудач: 0 | язык: en | персона: Samuel]
+   [платёж: deposit, ждёт 26ч, собрано: {'method': 'Visa card', 'amount': '5000 naira', 'paid_at': 'yesterday morning'}, спросили: ['receipt', 'sender']]
+
+👤 КЛИЕНТ: I don't have a screenshot right now
+fact check failed (collect_payment_details): number '5,000' is not in the sources
+🤖 БОТ [Partial]: No problem — you can still get it. Open your bank app, go to transaction history, find the payment and open its details; the receipt is there. The account or card number the money left from is shown in those same details.
+   кнопки: Found the details · Can't find it · Paid via another method
+   [16.0s | тема: deposit | сигнал: progress | неудач: 0 | язык: en | персона: Samuel]
+   [платёж: deposit, ждёт 26ч, собрано: {'method': 'Visa card', 'amount': '5000 naira', 'paid_at': 'yesterday morning', 'receipt': 'has no screenshot right now'}, спросили: ['receipt', 'sender', 'recipient']]
+
+👤 КЛИЕНТ: yesterday around 9am
+🔒 ЗАМЕТКА ДЛЯ L1:
+   AI Support Bot -> L1
+   Reason: deposit not received for ~26h (> 24h)
+   Topic: deposit; unsuccessful attempts: 0
+   Language: en; GEO: NG; device: Web
+   Persona: Samuel
+   PAYMENT CASE: deposit, waiting: 26h
+     method: Visa card
+     receipt: has no screenshot right now
+     amount: 5000 naira
+     paid_at: yesterday around 9am
+   Last user messages:
+   - I deposited 5000 naira with my bank card yesterday morning and it's still not in my balance!!
+   - Visa card
+   - I don't have a screenshot right now
+   - yesterday around 9am
+🤖 БОТ [Full]: Got it — yesterday around 9am, so it's been over 24 hours. I'm passing this to a support colleague who will continue right here in this chat with everything collected so far — you won't have to repeat anything. Please don't send that payment again while it's being checked.
+📞 ПЕРЕДАНО ОПЕРАТОРУ L1
+   [10.7s | тема: deposit | сигнал: progress | неудач: 0 | язык: en | персона: Samuel]
+   [платёж: deposit, ждёт 26ч, собрано: {'method': 'Visa card', 'amount': '5000 naira', 'paid_at': 'yesterday around 9am', 'receipt': 'has no screenshot right now'}, спросили: ['receipt', 'sender', 'recipient']]
+
+### Модель: deepseek; режим языков: PIVOT_LANGUAGES=(default)
+
+====================================================================================================
+4. Эфиопия, амхарский: как вывести деньги -> слабый для моделей язык, тут перевод нужнее всего
+====================================================================================================
+
+👤 КЛИЕНТ: ገንዘብ እንዴት ማውጣት እችላለሁ?
+   ↳ бот прочитал: How can I withdraw money?
+🤖 БОТ [Partial]: ሰላም፣ እኔ በረከት ነኝ 👋 በደስታ ስለ ገንዘብ ማውጣት አስረዳሃለሁ።
+
+የመለያ ምናሌህን ክፈት፣ ከዚያ "ከመለያ ገንዘብ አውጣ" የሚለውን ምረጥ — በመተግበሪያው ላይ ምናሌ → ቅንብሮች → ከመለያ ገንዘብ አውጣ ነው። የክፍያ ዘዴ ምረጥ፣ መጠኑን አስገባ፣ የሚያስፈልጉትን ዝርዝሮች ሙላና አረጋግጥ የሚለውን ተጫን።
+
+"ከመለያ ገንዘብ አውጣ" የሚለውን ክፍል አስቀድመህ አግኝተኸዋል?
+   кнопки: አዎ፣ አገኘሁት · አላገኘሁትም · የትኞቹ ዘዴዎች ይሰራሉ? · ገንዘቡ አልደረሰም
+   [9.0s | тема: withdrawal | сигнал: new_request | неудач: 0 | язык: am | персона: Bereket]
+
+👤 КЛИЕНТ: አልገባኝም፣ የትኛውን ቁልፍ ልጫን?
+   ↳ бот прочитал: I don't understand, which button should I press?
+🤖 БОТ [Partial]: ችግር የለም፣ ደረጃ በደረጃ እንሂድ 🙂
+መጀመሪያ፣ አፑን ክፈቱና የምናሌ አዶውን ይንኩ — አብዛኛውን ጊዜ በስክሪኑ ጥግ ላይ ሦስት መስመሮች ናቸው። ያዩታል?
+   кнопки: አዎ፣ ምናሌ አየሁ · ምናሌ አላየሁም · በትክክል የት ነው?
+   [10.5s | тема: withdrawal | сигнал: not_understood | неудач: 1 | язык: am | персона: Bereket]
