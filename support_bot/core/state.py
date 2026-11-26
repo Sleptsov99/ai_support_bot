@@ -37,6 +37,10 @@ class PaymentCase:
     details: dict[str, str] = field(default_factory=dict)  # method / amount / paid_at ... for the L1 card
     details_asked: list[str] = field(default_factory=list)
     pushback: int = 0  # "I already sent everything!" while we collect details
+    unanswered: int = 0  # messages in a row that do not answer "how long ago?" (3 -> L1, test review п.2)
+    receipt_asks: int = 0  # the receipt / request screenshot was asked this many times (asked again once)
+    method_clarified: bool = False  # the method in the user's words did not match the GEO list: asked with buttons
+    when: dict = field(default_factory=dict)  # what the user said about the day ("yesterday"), for "at 9 am" next
 
 
 @dataclass
@@ -90,6 +94,8 @@ class Dialogue:
     closed: bool = False
     escalation_reason: str | None = None
     last_signal: str | None = None  # for logs / the demo panel
+    account_number: str | None = None  # the user sent their account / ID number
+    unknown_prompts: int = 0  # times the bot asked "what is your question?" without a topic (button ladder)
 
     @property
     def active(self) -> bool:

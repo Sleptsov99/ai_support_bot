@@ -27,4 +27,4 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 
 [tool.setuptools.package-data]
-support_bot = ["data/*.json", "demo/*.html", "demo/*.json"]
+support_bot = ["*.html", "data/*.json", "data/*.md", "demo/*.html", "demo/*.json"]

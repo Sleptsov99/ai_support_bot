@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Бот: мониторинг</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2329; --muted:#6b7480; --line:#e3e6ea; --bad:#c0392b; --warn:#b9770e; --ok:#1e8449; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171a; --card:#1e2226; --text:#e6e8ea; --muted:#9aa3ad; --line:#2e343a; --bad:#ff6b5b; --warn:#f0b04a; --ok:#58d68d; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--text); font:14px/1.45 -apple-system, system-ui, sans-serif; }
+  h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:15px; margin:24px 0 8px; }
+  .muted { color:var(--muted); font-size:12px; }
+  .tabs button { border:1px solid var(--line); background:var(--card); color:var(--text); padding:6px 12px; border-radius:6px; cursor:pointer; margin-right:4px; }
+  .tabs button.on { background:var(--text); color:var(--bg); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(160px, 1fr)); gap:8px; }
+  .tile { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .tile .v { font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .tile .l { color:var(--muted); font-size:12px; }
+  .bad .v { color:var(--bad); } .warn .v { color:var(--warn); } .ok .v { color:var(--ok); }
+  .cols { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:8px; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; font-size:13px; }
+  th { color:var(--muted); font-weight:500; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .scroll { overflow-x:auto; }
+  .txt { max-width:340px; white-space:pre-wrap; word-break:break-word; }
+  .pill { display:inline-block; padding:1px 6px; border-radius:10px; font-size:11px; border:1px solid var(--line); }
+  .pill.h { color:var(--bad); border-color:var(--bad); }
+  #banner { display:none; margin:12px 0; padding:10px 12px; border-radius:8px; border:1px solid var(--bad); color:var(--bad); }
+</style>
+</head>
+<body>
+<h1>Мониторинг бота</h1>
+<div class="muted" id="meta">загрузка…</div>
+<div id="banner">Модель сейчас не отвечает: несколько запросов подряд завершились ошибкой. Бот отвечает запасными текстами.</div>
+<p class="tabs"><button data-w="hour">Час</button><button data-w="day" class="on">Сутки</button><button data-w="all">С запуска</button></p>
+<div class="grid" id="tiles"></div>
+<div class="cols">
+  <div><h2>Причины передачи на L1</h2><table id="reasons"></table></div>
+  <div><h2>Темы</h2><table id="topics"></table></div>
+  <div><h2>Языки</h2><table id="languages"></table></div>
+</div>
+<h2>Последние ходы</h2>
+<div class="scroll"><table id="turns"></table></div>
+<h2>Последние ошибки</h2>
+<div class="scroll"><table id="errors"></table></div>
+<script>
+let win = "day", data = null;
+const SIGNALS = {progress:"прогресс", new_request:"новый запрос", not_helped:"не помогло", not_understood:"не понял",
+  repeat:"повтор", dissatisfied:"недоволен", closing:"завершение", noise:"шум"};
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pct = x => x == null ? "—" : Math.round(x * 100) + "%";
+const num = x => x == null ? "—" : Number(x).toLocaleString("ru-RU");
+const sec = ms => ms == null ? "—" : (ms / 1000).toFixed(1) + " с";
+const time = iso => new Date(iso).toLocaleString("ru-RU", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit"});
+function tile(label, value, cls = "") { return `<div class="tile ${cls}"><div class="v">${value}</div><div class="l">${label}</div></div>`; }
+function pairs(id, rows, head) {
+  document.getElementById(id).innerHTML = `<tr><th>${head}</th><th class="num">ходов</th></tr>` +
+    (rows.length ? rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v}</td></tr>`).join("") : `<tr><td colspan="2" class="muted">нет данных</td></tr>`);
+}
+function render() {
+  if (!data) return;
+  const s = data[win];
+  document.getElementById("meta").textContent =
+    `Запущен ${time(data.started)} · вызовов модели ${num(data.llm.calls)}, ошибок ${num(data.llm.failed)} · обновляется каждые 30 с`;
+  document.getElementById("banner").style.display = data.llm.failing_now ? "block" : "none";
+  const r = s.results || {};
+  document.getElementById("tiles").innerHTML = [
+    tile("диалогов", num(s.chats)),
+    tile("ходов", num(s.turns)),
+    tile("передано на L1", `${num(s.handoffs)} <span class="muted">${pct(s.handoff_rate)}</span>`, s.handoff_rate > 0.4 ? "warn" : ""),
+    tile("ответ найден / частично / нет", `${r.Full || 0} / ${r.Partial || 0} / ${r.NotFound || 0}`),
+    tile("время ответа, среднее", sec(s.latency_ms.avg)),
+    tile("время ответа, p95", sec(s.latency_ms.p95), s.latency_ms.p95 > 20000 ? "warn" : ""),
+    tile("сбои вызовов модели (с повторами)", num(s.llm_errors), s.llm_errors ? "bad" : "ok"),
+    tile("запасные ответы", num(s.fallbacks), s.fallbacks ? "warn" : ""),
+    tile("фактчек не прошёл", num(s.fact_check_failed)),
+    tile("ошибки бота", num(s.errors), s.errors ? "bad" : "ok"),
+    tile("токены вход / выход", `${num(Math.round(s.tokens.in / 1000))}k / ${num(Math.round(s.tokens.out / 1000))}k`),
+    tile("из кэша", pct(s.tokens.cache_hit)),
+    tile("расходы, $ (оценка)", s.cost_usd.toFixed(2)),
+    tile("$ на диалог", s.cost_per_chat_usd == null ? "—" : s.cost_per_chat_usd.toFixed(4)),
+  ].join("");
+  pairs("reasons", s.handoff_reasons, "причина");
+  pairs("topics", s.topics, "тема");
+  pairs("languages", s.languages, "язык");
+  document.getElementById("turns").innerHTML =
+    "<tr><th>время</th><th>чат</th><th>язык</th><th>тема</th><th>сигнал</th><th>клиент</th><th>бот</th><th class='num'>время</th><th class='num'>токены</th></tr>" +
+    (data.recent_turns.map(t => `<tr>
+      <td>${time(t.ts)}<br><span class="muted">${esc(t.kind)}${t.superseded ? " · перезапрошен" : ""}</span></td>
+      <td>${esc(t.chat_id)}</td><td>${esc(t.language)}</td><td>${esc(t.topic)}</td>
+      <td>${esc(SIGNALS[t.signal] || t.signal)}${t.handoff ? ` <span class="pill h">L1: ${esc(t.escalation_reason)}</span>` : ""}${t.fallbacks ? ' <span class="pill">запасной</span>' : ""}</td>
+      <td class="txt">${esc(t.user_text)}</td><td class="txt">${esc(t.bot_text)}</td>
+      <td class="num">${sec(t.latency_ms)}</td><td class="num">${num(t.tokens_in)}</td></tr>`).join("") || "<tr><td colspan='9' class='muted'>пока пусто</td></tr>");
+  document.getElementById("errors").innerHTML = "<tr><th>время</th><th>где</th><th>чат</th><th>ошибка</th></tr>" +
+    (data.recent_errors.map(e => `<tr><td>${time(e.ts)}</td><td>${esc(e.where)}</td><td>${esc(e.chat_id)}</td><td class="txt">${esc(e.error)}</td></tr>`).join("") || "<tr><td colspan='4' class='muted'>ошибок нет</td></tr>");
+}
+async function load() {
+  try { data = await (await fetch("stats.json", {cache: "no-store"})).json(); render(); }
+  catch (e) { document.getElementById("meta").textContent = "не удалось загрузить статистику: " + e; }
+}
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+  win = b.dataset.w; document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b)); render();
+});
+load(); setInterval(load, 30000);
+</script>
+</body>
+</html>

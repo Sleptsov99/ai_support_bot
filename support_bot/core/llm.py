@@ -67,6 +67,8 @@ class AnalyzeRequest:
     now_local: str | None = None  # "2026-11-18 14:52 (Africa/Cairo)" to resolve "since yesterday morning"
     previous_contact: str | None = None  # short note about the client's previous conversation, if enabled
     asked_detail: str | None = None  # awaiting == "payment_details": which item the bot asked for
+    geo_methods: tuple[str, ...] = ()  # payment methods of the user's GEO (to map "by phone number" to a method)
+    timezone_known: bool = True  # False: no GEO, a clock time cannot be turned into hours
 
 
 @dataclass(frozen=True)
@@ -88,7 +90,13 @@ class Analysis:
     noise: bool = False  # no content at all
     risk: Risk | None = None  # responsible gaming / self-harm / minor
     media_understood: bool = True
-    payment_details: dict[str, str] = field(default_factory=dict)  # method / amount / paid_at ... found in text
+    payment_details: dict[str, str] = field(default_factory=dict)  # method / amount / paid_at / wallet / receipt
+    payment_when: dict | None = None  # calendar answer about the payment time: date / days_ago / weekday / time /
+    #                                   part_of_day; turned into hours by code (timeparse.py)
+    greeting: bool = False  # "hello", "الو", "hi sir": a greeting without a question
+    chasing_losses: bool = False  # "lost everything, should I deposit to win it back?" - not an addiction signal
+    payment_unclear: bool = False  # "my deposit failed": failed with an error, or charged but not credited?
+    account_number: str | None = None  # the message is only an account / ID number
     english_text: str | None = None  # set by the engine in pivot mode: the translated text the model read
 
     @property
@@ -114,6 +122,10 @@ class Task(str, Enum):
     HANDOFF = "handoff"  # message to the user before transfer to L1
     RISK_SUPPORT = "risk_support"  # responsible gaming / self-harm: care first, then L1
     MEDIA_UNREADABLE = "media_unreadable"  # ask to describe the file content in text
+    GREET = "greet"  # "hello" / "الو": greet, introduce yourself, ask how to help (top topics as buttons)
+    RESPONSIBLE_GAMING = "responsible_gaming"  # "deposit to win it back?": no advice to deposit, limits, no L1
+    CLARIFY_PAYMENT_KIND = "clarify_payment_kind"  # "deposit failed": error, or charged but not credited?
+    ACCOUNT_NUMBER = "account_number"  # only an account number: thank, ask what the question is
 
 
 @dataclass(frozen=True)
@@ -174,7 +186,12 @@ _FED_UP = re.compile(r"already (sent|told|did)|how many times|уже (все |в
 _COMPLAINT = re.compile(r"complain|жалоб|пожалуюсь|scam|мошенн|обман|fraud", re.I)
 _NOISE = re.compile(r"^[\s?!.,)(]*((sir|сэр|hello|hi|привет|алло|hey|ау)[\s?!.,]*)*$", re.I)
 _OFF_TOPIC = re.compile(r"weather|погод|joke|анекдот|шутк|politic|политик|who are you|ты кто|ты бот", re.I)
-_RISK_GAMBLING = re.compile(r"addict|can'?t stop|lost everything|лудоман|зависим|не могу остановиться|проиграл все", re.I)
+_RISK_GAMBLING = re.compile(r"addict|can'?t stop|лудоман|зависим|не могу остановиться|self.?exclu|самоисключ", re.I)
+_CHASING = re.compile(r"отыгра|win (it )?back|chase", re.I)
+_GREETING = re.compile(r"^[\s?!.,)(]*((hello|hi|hey|привет|здравствуй\w*|добрый день|алло|الو|السلام عليكم|salam)"
+                       r"[\s?!.,]*)+(sir|сэр)?[\s?!.,]*$", re.I)
+_FAILED = re.compile(r"неуспешн|не прош(ла|ел)|failed|declined|ошибк", re.I)
+_ACCOUNT_NO = re.compile(r"^\s*(id|ид|№|#)?\s*\d{6,12}\s*$", re.I)
 _RISK_SELF = re.compile(r"kill myself|suicide|покончу|не хочу жить|убить себя", re.I)
 _MINOR = re.compile(r"i'?m (1[0-7]|[5-9]) years|мне (1[0-7]|[5-9]) ?(лет)?\b", re.I)
 _AMOUNT = re.compile(r"(?:\bна|\bfor|\bof)\s+(\d{2,}(?:[.,]\d+)?)(?!\s*(?:min|h|час|мин|д|day))|"
@@ -195,8 +212,6 @@ _PHRASES: list[tuple[re.Pattern[str], float, float]] = [
     (re.compile(r"just now|только что|сейчас", re.I), 0.1, 0.1),
     (re.compile(r"an hour ago|час назад", re.I), 1.0, 1.0),
     (re.compile(r"more than (a|one) day|больше суток|более суток|over 24", re.I), 25.0, 25.0),
-    (re.compile(r"yesterday morning|вчера утром|со вчерашнего утра", re.I), 25.0, 34.0),
-    (re.compile(r"yesterday|вчера", re.I), 12.0, 36.0),  # ambiguous around 24h -> the engine asks once more
     (re.compile(r"several days|few days|несколько дней|третий день|третьи сутки|неделю|week", re.I), 48.0, 48.0),
 ]
 
@@ -211,6 +226,40 @@ def parse_wait_range(text: str) -> tuple[float, float] | None:
         if rx.search(text):
             return lo, hi
     return None
+
+
+_WEEKDAYS_RU = {"понедельник": "monday", "вторник": "tuesday", "сред": "wednesday", "четверг": "thursday",
+                "пятниц": "friday", "суббот": "saturday", "воскресень": "sunday"}
+_PART_RU = {"утр": "morning", "morning": "morning", "днём": "afternoon", "днем": "afternoon", "afternoon": "afternoon",
+            "вечер": "evening", "evening": "evening", "ноч": "night", "night": "night"}
+
+
+def parse_when(text: str) -> dict | None:
+    """Calendar references for the fake NLU (the real model returns the same structure)."""
+    low = text.lower()
+    when: dict = {}
+    if m := re.search(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b", low):
+        when["date_dm"] = (int(m.group(1)), int(m.group(2)))
+    if re.search(r"позавчера|day before yesterday", low):
+        when["days_ago"] = 2
+    elif re.search(r"вчера|yesterday", low):
+        when["days_ago"] = 1
+    elif re.search(r"сегодня|today", low):
+        when["days_ago"] = 0
+    for k, v in _WEEKDAYS_RU.items():
+        if k in low or v in low:
+            when["weekday"] = v
+    if m := re.search(r"\b(?:в|at)\s*(\d{1,2})(?::(\d{2}))?\s*(?:утра|am|часов|ч\b)?", low):
+        h = int(m.group(1)) + (12 if re.search(r"pm|вечера", low) and int(m.group(1)) < 12 else 0)
+        if h < 24 and "date_dm" not in when or m.start() > 0:
+            when["time"] = f"{h:02d}:{m.group(2) or '00'}"
+    for k, v in _PART_RU.items():
+        if k in low:
+            when["part_of_day"] = v
+            break
+    if not when or set(when) == {"time"} and not re.search(r"\b(в|at)\s*\d{1,2}", low):
+        return None
+    return when
 
 
 def parse_wait_hours(text: str) -> float | None:
@@ -269,14 +318,27 @@ class FakeLLM:
         wants_operator = bool(_OPERATOR.search(text))
         confirmation = "yes" if _YES.search(text) else "no" if _NO.search(text) else None
         wait = parse_wait_range(text)
+        when = parse_when(text)
+        if when:
+            wait = None
+            if "date_dm" in when:
+                d_, m_ = when.pop("date_dm")
+                year = (req.now_local or "")[:4]
+                when["date"] = f"{year if year.isdigit() else 2026}-{m_:02d}-{d_:02d}"
         noise = (not text.strip() and not req.media) or bool(text.strip() and _NOISE.match(text))
         off_topic = bool(_OFF_TOPIC.search(text)) and category is None
         risk: Risk | None = ("self_harm" if _RISK_SELF.search(text) else
                              "gambling_harm" if _RISK_GAMBLING.search(text) else
                              "minor" if _MINOR.search(text) else None)
         gratitude = bool(_THANKS.search(text)) and confirmation is None
-        understood = bool(category or wants_operator or confirmation or gratitude or wait is not None
-                          or off_topic or noise or risk or complaint)
+        greeting = bool(_GREETING.match(text))
+        chasing = bool(_CHASING.search(text)) and risk is None
+        unclear = bool(_FAILED.search(text)) and category == "deposit" and not _NOT_ARRIVED.search(text)
+        account_no = text.strip() if _ACCOUNT_NO.match(text) and req.awaiting is None else None
+        if unclear:
+            payment = None
+        understood = bool(category or wants_operator or confirmation or gratitude or wait is not None or when
+                          or off_topic or noise or risk or complaint or chasing or account_no)
         if not understood and req.current_category and req.awaiting is None and len(text.split()) <= 6:
             understood = True  # answer in context ("OPay", "I opened the cashier") -> continues the current problem
         signal: Signal
@@ -303,6 +365,17 @@ class FakeLLM:
             details["amount"] = m.group(1) or m.group(2)
         if m := _METHOD.search(text):
             details["method"] = m.group(0)
+        geo = {x.lower(): x for x in req.geo_methods}
+        if details.get("method", "").lower() in geo:
+            details["method"] = geo[details["method"].lower()]
+        if req.asked_detail and req.awaiting == "payment_details" and not details:
+            if req.asked_detail == "wallet" and re.search(r"\d{6,}", text):
+                details["wallet"] = re.search(r"\d{6,}", text).group(0)
+        if req.asked_detail and "amount" in req.asked_detail and "amount" not in details:
+            if m := re.match(r"^\s*(\d+(?:[.,]\d+)?)\b(?!:)", text):
+                details["amount"] = m.group(1)
+        if req.asked_detail and "paid_at" in req.asked_detail and (when or re.search(r"\d{1,2}:\d{2}", text)):
+            details["paid_at"] = re.sub(r"^\s*\d+(?:[.,]\d+)?\s*,?\s*", "", text).strip() or text
         return Analysis(
             payment_details=details,
             language=detect_script_language(text),
@@ -322,6 +395,11 @@ class FakeLLM:
             noise=noise,
             risk=risk,
             media_understood=not req.media or bool(text.strip()),
+            payment_when=when,
+            greeting=greeting,
+            chasing_losses=chasing,
+            payment_unclear=unclear,
+            account_number=account_no,
         )
 
     async def compose(self, req: ComposeRequest) -> Composed:
@@ -353,6 +431,13 @@ class FakeLLM:
             Task.HANDOFF: ("I'm passing your request to a support specialist, they will reply here.", "Partial"),
             Task.RISK_SUPPORT: ("I hear you, and I'm sorry it's so hard right now. A colleague will join this chat.", "Partial"),
             Task.MEDIA_UNREADABLE: ("I couldn't read the file. Could you describe the problem in text?", "NotFound"),
+            Task.GREET: ("Hello!\n\nHow can I help you?", "Partial"),
+            Task.RESPONSIBLE_GAMING: ("I understand how frustrating losses are. Trying to win back with a new deposit "
+                                      "usually makes it worse. You can set deposit limits or take a break in the "
+                                      "Responsible Gaming section.", "Full"),
+            Task.CLARIFY_PAYMENT_KIND: ("Let's figure it out.\n\nDid the payment fail with an error, or was the "
+                                        "money charged but not credited?", "Partial"),
+            Task.ACCOUNT_NUMBER: ("Thank you, I've noted your account number.\n\nWhat is your question?", "Partial"),
         }
         text, result = texts[t]
         if t is Task.PAYMENT_WITHIN_NORM and req.kb:

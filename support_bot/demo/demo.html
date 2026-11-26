@@ -88,7 +88,7 @@
             <option value="GH">Гана (GH)</option><option value="">не передано</option>
           </select></label>
         <label>Язык интерфейса
-          <select id="lang"><option value="ru">ru</option><option value="en">en</option><option value="ar">ar</option><option value="ky">ky</option><option value="">не передан</option></select></label>
+          <select id="lang"><option value="ar">ar</option><option value="en">en</option><option value="fr">fr</option><option value="es">es</option><option value="tr">tr</option><option value="az">az</option><option value="ky">ky</option><option value="sw">sw</option><option value="am">am</option><option value="ru">ru</option><option value="">не передан</option></select></label>
         <label>Устройство
           <select id="channel"><option>App_Android</option><option>WebMobi</option><option>Web</option><option>App_iOs</option></select></label>
       </div>
@@ -108,7 +108,6 @@
       <h2>Обмен с Consultant (webhook ⇄ /messages)</h2>
       <div class="log" id="log"></div>
     </div>
-    <div class="banner">Демо: LLM-заглушка (шаблонные тексты, ключевые слова вместо понимания) и тестовая база знаний из 7 ответов. Логика движка (персоны, язык, счетчики неудач по проблемам, сбор данных по платежу, порядок реакций) настоящая. С ключом ANTHROPIC_API_KEY и LLM_PROVIDER=claude демо работает на Claude.</div>
   </section>
 </div>
 
@@ -125,6 +124,10 @@ async function api(path, body) {
   const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
   return r.json();
 }
+// Typical interface language for the country; the bot still answers in the language the client writes in.
+const GEO_LANG = {EG:"ar", NG:"en", KE:"en", KG:"ky", TR:"tr", AZ:"az", SA:"ar", AR:"es", ZA:"en", GH:"en"};
+function syncLang() { const l = GEO_LANG[$("geo").value]; if (l) $("lang").value = l; }
+$("geo").addEventListener("change", syncLang); syncLang();
 function client() { return { geo: $("geo").value || null, language: $("lang").value || null, channel: $("channel").value }; }
 
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }

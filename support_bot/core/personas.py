@@ -24,6 +24,7 @@ class PersonaPool:
     money: str
     forbidden: str
     female: frozenset[str] = frozenset()  # names that need feminine grammar (ru "рада", ar "سعيدة"...)
+    example: str = ""  # "Пример поведения" from the personas document (tone sample, in Russian)
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ def _pool(geo: str | None, raw: dict) -> PersonaPool:
         money=raw.get("money", ""),
         forbidden=raw["forbidden"],
         female=frozenset(raw.get("female", ())),
+        example=raw.get("example", ""),
     )
 
 

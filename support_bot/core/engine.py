@@ -26,14 +26,18 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import json
 import logging
+import re
+from pathlib import Path
 from dataclasses import dataclass, field, replace
 from zoneinfo import ZoneInfo
 
 from .actions import HandOff, NoteToOperator, Option, Outcome, Resolve, Say, SetLanguage
 from .budget import EscalationBudget
 from .catalog import BY_KEY, CATEGORIES, COMPLAINT, EscalationGroup, resolve_variant
-from .guard import check_reply
+from .guard import check_reply, promises_handoff
+from ..monitoring import note
 from .kb import KnowledgeBase
 from .language import DEFAULT_LANGUAGE, normalize
 from .llm import (
@@ -49,6 +53,7 @@ from .llm import (
 )
 from .personas import PersonaRegistry
 from .state import UNKNOWN_ISSUE, ContactMemory, Dialogue, DialogueStore, Issue, PaymentCase
+from .timeparse import COUNTRY_TZ, hours_since
 from .translation import LanguagePolicy, NoTranslator, Translator
 
 log = logging.getLogger(__name__)
@@ -64,6 +69,38 @@ WAIT_OPTIONS = (
     (Option("wait:gt24", "> 24 hours"), 25.0),
 )
 CONFIRM_OPTIONS = (Option("confirm:yes", "Yes"), Option("confirm:no", "No"))
+# Test review п.18/22: the most frequent requests. (id, English label, category, sub-question)
+TOP_REQUESTS = (
+    ("top:deposit_missing", "Deposit not received", "deposit", "Deposit not received"),
+    ("top:how_deposit", "How to top up", "deposit", "How to make deposit?"),
+    ("top:payment_status", "Payment request status", "deposit", "Payment request status"),
+    ("top:withdrawal_missing", "Withdrawal not received", "withdrawal", "Withdrawal not received"),
+    ("top:login", "Can't log in", "account", "Login issues"),
+    ("top:bonus", "Bonuses & promo codes", "bonuses", "Bonuses and promo codes"),
+)
+TOP_BY_ID = {t[0]: t for t in TOP_REQUESTS}
+GREETING_TOPICS = ("top:deposit_missing", "top:withdrawal_missing", "top:login")
+PAYMENT_KIND_OPTIONS = (Option("pay:failed", "Payment failed"), Option("pay:charged", "Charged, not on balance"))
+OTHER_METHOD = "Other method"
+# Test review п.4: the bot never offers "operator" / "supervisor" buttons itself.
+_OPERATOR_LABEL = re.compile(
+    r"operat|supervis|оператор|супервайз|сотрудник|живой человек|human|real person|مشرف|موظف|opérateur|"
+    r"superviseur|humano|operador|operatör|yetkili|temsilci|msimamizi|mhudumu", re.I)
+_MARKDOWN = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.S)
+_SENTENCE_END = re.compile(r"(?<=[.!…。])\s+|\n+")
+DATA = Path(__file__).resolve().parents[1] / "data"
+
+
+def _split_sentences(text: str) -> list[str]:
+    return _SENTENCE_END.split(text)
+
+
+def load_payment_methods(path: Path = DATA / "payment_methods.json") -> dict[str, list[str]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {geo.upper(): list(v.get("deposit", [])) for geo, v in raw.get("geo", {}).items()}
 # "Complain about operator" / "File a complaint" live under Contacts (group D) but are complaints (14.1).
 COMPLAINT_SUBQUESTIONS = {("contacts", 3), ("contacts", 4)}
 PAYMENT_KINDS = ("deposit", "withdrawal")
@@ -72,12 +109,16 @@ FALLBACK_TEXTS = {
     Task.ANSWER: "Could you tell me a bit more about your question?",
     Task.HANDOFF: "I'm passing your request to a support colleague, they will continue in this chat.",
     Task.RISK_SUPPORT: "Thank you for telling me. A support colleague will join this chat now to help you.",
+    Task.GREET: "Hello! How can I help you?",
+    Task.RESPONSIBLE_GAMING: "Please don't try to win losses back with a new deposit. You can set limits or a "
+                             "self-exclusion in the Responsible Gaming section of your profile.",
+    Task.CLARIFY_PAYMENT_KIND: "Did the payment fail with an error, or was the money charged but not credited?",
+    Task.ACCOUNT_NUMBER: "Thank you! What is your question about this account?",
     Task.ASK_WAIT_TIME: "How much time has passed since the payment?",
     Task.CLARIFY_WAIT_TIME: "Roughly how many hours have passed since the payment?",
     Task.ASK_RESOLVED: "Did that solve your question?",
     Task.GOODBYE: "Glad I could help! Write any time if you have other questions.",
-    Task.COLLECT_PAYMENT_DETAILS: "To pass this to a specialist, could you share the payment details: method, amount "
-                                  "and time?",
+    Task.COLLECT_PAYMENT_DETAILS: "Could you share the payment details: method, amount and time?",
 }
 
 
@@ -108,15 +149,18 @@ class PlatformMessage:
 @dataclass
 class EngineConfig:
     max_attempts: int = 5  # group A, ТЗ 14.3
-    complaint_attempts: int = 2  # complaints: "high escalation allowed"
+    complaint_attempts: int = 5  # test review п.1: complaints go through the normal cycle, no early L1
     extra_attempts_over_budget: int = 2  # ТЗ 14.6
     payment_threshold_hours: float = 24.0  # group B, ТЗ 14.4
-    max_wait_questions: int = 2  # asking "how long?" more times than this -> escalate
-    usual_payment_hours: dict = field(default_factory=lambda: {"deposit": 12.0})  # from the KB; None = say as the KB does
-    payment_silence_seconds: float = 300.0  # no answer to "how long?" -> L1 (0 = off), see open question 1
-    # asked before L1 (ТЗ dialogue 4); "personal data" handling is out of scope for the demo
-    payment_detail_fields: tuple[str, ...] = ("method", "receipt", "amount", "paid_at", "sender", "recipient")
-    risk_escalates: bool = True  # gambling harm / self-harm -> L1 at once (not in the ТЗ, open question 3)
+    max_unanswered_wait: int = 3  # test review п.2: 3 messages in a row without the time -> L1
+    usual_payment_hours: dict = field(default_factory=lambda: {"deposit": 24.0})  # test review п.3: one term, 24h
+    payment_silence_seconds: float = 0.0  # test review п.2: silence is not a reason for L1 (the timer is off)
+    # test review «Какие данные бот собирает по платежам»: at most 4 questions, amount and time asked together
+    payment_detail_groups: tuple[tuple[str, ...], ...] = (("method",), ("amount", "paid_at"), ("wallet",),
+                                                          ("receipt",))
+    markdown: bool = False  # test review п.16: Consultant shows "**" as is -> plain text
+    payment_methods: dict = field(default_factory=load_payment_methods)  # GEO -> methods (Google sheet)
+    risk_escalates: bool = True  # explicit addiction / self-exclusion / self-harm -> L1 at once (test review п.1)
     resolve_after_seconds: int | None = None
     history_limit: int = 30
     fact_check: bool = True
@@ -260,6 +304,7 @@ class Engine:
             current_language=d.language, now_local=self._now_local(d), previous_contact=d.previous_contact,
             asked_detail=(d.payment.details_asked[-1] if d.awaiting == "payment_details" and d.payment
                           and d.payment.details_asked else None),
+            geo_methods=tuple(self._geo_methods(d)), timezone_known=self._tz(d) is not None,
         ))
         if pivot:
             analysis = replace(analysis, language=detected or current_lang, language_confident=detected is not None,
@@ -295,14 +340,18 @@ class Engine:
     async def _route(self, ctx: _Ctx) -> None:
         d, a = ctx.d, ctx.analysis
 
-        # Safety first: responsible gaming / self-harm. Not in the ТЗ (Responsible gaming is group D there),
-        # see open question 3. Minors get the age rules from the KB, no escalation.
+        # Safety first. Test review п.1: only explicit addiction / self-exclusion / self-harm goes to L1 at once;
+        # complaints about losses and "deposit to win it back?" are answered by the bot.
         if a.risk in ("gambling_harm", "self_harm") and self.cfg.risk_escalates:
             await self._escalate(ctx, reason=f"risk signal: {a.risk}", task=Task.RISK_SUPPORT)
             return
         if a.risk == "minor":
             d.switch_issue("rules")
             await self._say(ctx, Task.ANSWER, kb=self._kb("age restrictions minimum age", "rules"))
+            return
+        if a.chasing_losses:
+            await self._say(ctx, Task.RESPONSIBLE_GAMING,
+                            kb=self._kb("ответственная игра лимиты самоисключение", "rules"))
             return
 
         # ТЗ 16: closing the dialogue
@@ -322,6 +371,12 @@ class Engine:
             await self._say(ctx, Task.ASK_RESOLVED, options=CONFIRM_OPTIONS)
             return
 
+        # Test review п.19: "my deposit failed" - an error, or charged but not credited? Ask first.
+        if a.payment_unclear and not a.payment_issue and (d.payment is None or not d.payment.over_threshold):
+            d.switch_issue(a.category if a.category in PAYMENT_KINDS else "deposit")
+            await self._say(ctx, Task.CLARIFY_PAYMENT_KIND, options=PAYMENT_KIND_OPTIONS)
+            return
+
         # ТЗ 14.4: group B, payment cases
         if a.payment_issue and (d.payment is None or d.payment.kind != a.payment_issue):
             d.payment = PaymentCase(kind=a.payment_issue)
@@ -333,17 +388,27 @@ class Engine:
         # Off-topic and pure noise never count as attempts and never escalate.
         if a.off_topic and not a.category and not a.wants_operator:
             d.off_topic_count += 1
-            await self._say(ctx, Task.OFF_TOPIC, options=self._category_options() if not d.current else ())
+            await self._say(ctx, Task.OFF_TOPIC, options=self._ladder_options(d) if not d.current else ())
             return
-        if self._is_noise(a):
+        if a.account_number and not a.category and not a.wants_operator:  # п.20: only an account number
+            d.account_number = a.account_number
+            await self._say(ctx, Task.ACCOUNT_NUMBER, options=self._top_options(GREETING_TOPICS))
+            return
+        if self._is_noise(a) or (a.greeting and not (a.category or a.wants_operator or a.payment_issue)):
             d.noise_count += 1
-            first = d.noise_count == 1 and not d.current
-            await self._say(ctx, Task.CLARIFY_UNRECOGNIZED if first else Task.NUDGE,
-                            options=self._category_options() if not d.current else ())
+            if d.noise_count == 1 and not d.current:  # п.18: a greeting gets a greeting, top topics as buttons
+                await self._say(ctx, Task.GREET, options=self._top_options(GREETING_TOPICS))
+            else:
+                await self._say(ctx, Task.NUDGE, options=self._ladder_options(d) if not d.current else ())
             return
 
-        # Which problem is this about? (ТЗ 15.2: a short answer continues the current problem)
-        if a.category and a.category != d.current:
+        # Which problem is this about? (ТЗ 15.2 / test review п.21: only a NEW problem named by the user starts a
+        # new cycle; "yes" / "no" / a short answer to the bot's question continues the current one)
+        new_topic = a.category and a.category != d.current and (
+            d.current in (None, UNKNOWN_ISSUE) or a.signal == "new_request" or a.category in d.issues
+            or a.confirmation is None
+            and a.signal not in ("progress", "not_helped", "repeat", "dissatisfied", "not_understood"))
+        if new_topic:
             d.switch_issue(a.category)
         elif d.current is None:
             d.switch_issue(UNKNOWN_ISSUE)
@@ -363,107 +428,222 @@ class Engine:
         if ctx.media and not a.media_understood:
             await self._say(ctx, Task.MEDIA_UNREADABLE)
         elif a.wants_operator and issue.key == UNKNOWN_ISSUE:
-            await self._say(ctx, Task.DEFLECT_OPERATOR)
+            await self._say(ctx, Task.DEFLECT_OPERATOR, options=self._ladder_options(d))
         elif not a.understood and issue.key == UNKNOWN_ISSUE:
-            await self._say(ctx, Task.CLARIFY_UNRECOGNIZED, options=self._category_options())
+            await self._say(ctx, Task.CLARIFY_UNRECOGNIZED, options=self._ladder_options(d))
         else:
             await self._say(ctx, Task.ANSWER, kb=self._kb(ctx.text, issue.category))
+
+    def _ladder_options(self, d: Dialogue) -> tuple[Option, ...]:
+        """Test review п.22: buttons change from attempt to attempt while the topic is unknown.
+
+        1st time: the 12 categories of the ТЗ; 2nd: the 6 most popular requests; then () - the model offers
+        3-4 likely requests from what the user already wrote.
+        """
+        d.unknown_prompts += 1
+        if d.unknown_prompts == 1:
+            return self._category_options()
+        if d.unknown_prompts == 2:
+            return self._top_options(tuple(t[0] for t in TOP_REQUESTS))
+        return ()
+
+    @staticmethod
+    def _top_options(ids: tuple[str, ...]) -> tuple[Option, ...]:
+        return tuple(Option(i, TOP_BY_ID[i][1]) for i in ids)
+
+    def _geo_methods(self, d: Dialogue) -> list[str]:
+        return list(self.cfg.payment_methods.get((d.country or "").upper(), ()))
+
+    def _method_options(self, d: Dialogue) -> tuple[Option, ...]:
+        methods = self._geo_methods(d)
+        if not methods:
+            return ()  # unknown GEO list: no generic "card / bank / crypto" buttons, the user types it
+        return tuple(Option(f"method:{i}", m) for i, m in enumerate(methods)) + (Option("method:other", OTHER_METHOD),)
 
     def _in_payment_flow(self, d: Dialogue, a: Analysis) -> bool:
         p = d.payment
         if p is None or p.within_norm:
             return False
-        switched = a.category is not None and a.category not in (p.kind, COMPLAINT.key)
+        switched = a.category is not None and a.category not in (p.kind, COMPLAINT.key) and a.signal == "new_request"
         if switched:
             return False
         return bool(a.payment_issue) or d.awaiting in ("wait_time", "payment_details") or p.over_threshold
+
+    def _wait_range(self, d: Dialogue, a: Analysis) -> tuple[float, float] | None | str:
+        """Hours since the payment as (min, max); "no_tz" if a calendar answer cannot be converted."""
+        if a.payment_when:
+            tz = self._tz(d)
+            if tz is None:
+                return "no_tz"
+            when = dict(a.payment_when)
+            p = d.payment
+            if p is not None:
+                if not any(when.get(k) is not None for k in ("date", "days_ago", "weekday")):
+                    # "yesterday" ... "at 9 am": the day from the previous answer, the hour from this one
+                    when = {**{k: v for k, v in p.when.items() if k in ("date", "days_ago", "weekday")}, **when}
+                p.when = when
+            rng = hours_since(when, self._clock().astimezone(tz))
+            if rng is not None:
+                return rng
+        if a.wait_hours is not None:
+            return a.wait_hours, a.wait_hours_max if a.wait_hours_max is not None else a.wait_hours
+        return None
 
     async def _payment_flow(self, ctx: _Ctx) -> None:
         d, a = ctx.d, ctx.analysis
         p = d.payment
         assert p is not None
         d.switch_issue(p.kind)
-        p.details.update({k: v for k, v in a.payment_details.items() if v})  # whatever the client told so far
+        self._merge_details(ctx)
 
         if p.over_threshold:  # > 24h: collecting details for L1 (dialogue 4)
             await self._collect_details(ctx)
             return
 
-        if a.wait_hours is not None:
-            hours = a.wait_hours
-            if a.wait_ambiguous:
+        wait = self._wait_range(d, a)
+        if wait == "no_tz":  # п.5: no GEO -> no time zone -> ask for hours, not a clock time
+            self._await(d, "wait_time")
+            await self._say(ctx, Task.CLARIFY_WAIT_TIME, options=tuple(o for o, _ in WAIT_OPTIONS),
+                            facts=("the user's time zone is unknown: ask roughly how many hours have passed since "
+                                   "the payment (not the date or the clock time)",))
+            return
+        if isinstance(wait, tuple):
+            lo, hi = wait
+            p.unanswered = 0
+            if lo <= self.cfg.payment_threshold_hours < hi:  # both sides of 24h: ask for the hour
                 if p.clarify_asked < 1:
                     p.clarify_asked += 1
                     self._await(d, "wait_time")
-                    await self._say(ctx, Task.CLARIFY_WAIT_TIME, options=tuple(o for o, _ in WAIT_OPTIONS))
-                    ctx.out.silence_timeout = self.cfg.payment_silence_seconds or None
+                    await self._say(ctx, Task.CLARIFY_WAIT_TIME, options=tuple(o for o, _ in WAIT_OPTIONS),
+                                    facts=(f"from the user's answer it is between {lo:g} and {hi:g} hours: ask the "
+                                           "approximate hour of the payment, or how many hours have passed",))
                     return
-                hours = a.wait_hours_max or hours  # still unclear: in favour of the client
-            p.wait_hours = hours
+                lo = hi  # still unclear: in favour of the client
+            p.wait_hours = lo
             d.awaiting = None
-            if hours > self.cfg.payment_threshold_hours:
+            if lo > self.cfg.payment_threshold_hours:
                 p.over_threshold = True
-                p.details.update(a.payment_details)
                 await self._collect_details(ctx, first=True)
                 return
             p.within_norm = True
             await self._say(ctx, Task.PAYMENT_WITHIN_NORM, kb=self._kb(f"{p.kind} processing time", p.kind),
-                            facts=self._deadline_facts(d, hours, p.kind))
+                            facts=self._deadline_facts(d, lo, p.kind))
             return
 
         if a.signal == "closing" and not a.payment_issue:  # "ok thanks" instead of the time: let them go
             d.awaiting = "confirmation"
             await self._say(ctx, Task.ASK_RESOLVED, options=CONFIRM_OPTIONS)
             return
-        if p.wait_questions_asked >= self.cfg.max_wait_questions:
-            await self._escalate(ctx, reason=f"{p.kind} not received, the user did not tell the waiting time")
-            return
+        if a.wants_operator or d.awaiting == "wait_time":
+            # п.2: "الو", "?", "operator" are not a refusal. Only 3 messages in a row without the time -> L1.
+            if a.wants_operator:
+                d.issue.failures += 1
+            p.unanswered += 1
+            if p.unanswered >= self.cfg.max_unanswered_wait:
+                await self._escalate(ctx, reason=f"{p.kind} not received, {p.unanswered} messages in a row "
+                                                 "without the waiting time")
+                return
         p.wait_questions_asked += 1
+        repeat = p.wait_questions_asked > 1
         self._await(d, "wait_time")
-        await self._say(ctx, Task.ASK_WAIT_TIME, options=tuple(o for o, _ in WAIT_OPTIONS))
+        await self._say(ctx, Task.ASK_WAIT_TIME, options=tuple(o for o, _ in WAIT_OPTIONS),
+                        facts=("you already asked this: ask again in ONE short sentence and point to the buttons",)
+                        if repeat else ())
         ctx.out.silence_timeout = self.cfg.payment_silence_seconds or None
 
-    async def _collect_details(self, ctx: _Ctx, first: bool = False) -> None:
-        """> 24h: collect what L1 needs before the hand-off (ТЗ dialogue 4), then escalate.
+    def _merge_details(self, ctx: _Ctx) -> None:
+        """Whatever the user told so far, in any order (test review: answers are accepted in any order)."""
+        d, a = ctx.d, ctx.analysis
+        p = d.payment
+        assert p is not None
+        for k, v in a.payment_details.items():
+            if v and k in ("method", "amount", "paid_at", "wallet"):
+                p.details[k] = v
+        if ctx.media:
+            p.details["receipt"] = "received (attached in the chat)"
 
-        Every field is asked at most once; a field the user already mentioned is skipped;
-        with a receipt attached amount and time are on it. Irritation is answered with an
-        explanation (dialogue 4), a second push back hands off with what we have.
+    async def _collect_details(self, ctx: _Ctx, first: bool = False) -> None:
+        """> 24h: collect what L1 needs before the hand-off (test review «Какие данные бот собирает»).
+
+        At most 4 questions: method (buttons of the GEO) / amount + date and time / wallet / receipt (deposit) or
+        the request screenshot from the AvaBet history (withdrawal). A field the user already gave is skipped,
+        answers are accepted in any order, the receipt is asked again once, then the case goes without it.
         """
         d, a = ctx.d, ctx.analysis
         p = d.payment
         assert p is not None
-        p.details.update({k: v for k, v in a.payment_details.items() if v})
+        self._merge_details(ctx)
+        if first and p.wait_hours is not None and "paid_at" not in p.details and a.payment_when:
+            p.details["paid_at"] = self._describe_when(a.payment_when)
         asked = p.details_asked[-1] if p.details_asked else None
         pushback = not first and (a.wants_operator or a.signal in ("dissatisfied", "repeat")
                                   or (a.aggressive and not ctx.media))
-        if not first and asked and asked not in p.details and not pushback and not a.payment_details:
-            # the model found nothing structured: keep the raw answer under the asked item
-            if ctx.media:
-                p.details[asked if asked == "receipt" else "receipt"] = "attached (see the chat)"
-            if ctx.text and asked != "receipt":
-                p.details[asked] = ctx.text[:200]  # the answer to what we just asked
-            elif asked == "receipt" and not ctx.media and ctx.text:
-                p.details["receipt"] = f"not sent: {ctx.text[:150]}"
-        elif ctx.media:
-            p.details.setdefault("receipt", "attached (see the chat)")
+        if not first and asked and not pushback and not a.payment_details and not ctx.media and ctx.text:
+            if asked == "receipt":
+                p.details.setdefault("receipt_note", ctx.text[:150])  # "will send later", "I have none"
+            else:  # the answer to what we just asked ("amount+paid_at" in one go: keep the words as the time)
+                fields = asked.split("+")
+                p.details.setdefault("paid_at" if "paid_at" in fields else fields[0], ctx.text[:200])
         if pushback:
             p.pushback += 1
             if p.pushback >= 2 or not asked:
                 await self._escalate(ctx, reason=f"{p.kind} not received for ~{p.wait_hours:g}h (> 24h)")
                 return
             self._await(d, "payment_details")
-            await self._say(ctx, Task.COLLECT_PAYMENT_DETAILS, missing=asked)  # explain why, ask again
+            await self._say(ctx, Task.COLLECT_PAYMENT_DETAILS, missing=asked, options=self._detail_options(d, asked),
+                            facts=("the user is irritated and did not answer: acknowledge the feeling, explain in one "
+                                   "sentence why exactly this item helps to find the payment faster, then ask it in "
+                                   "OTHER words than your previous message",))  # п.11/12
             return
-        on_receipt = ("amount", "paid_at") if p.details.get("receipt", "").startswith("attached") else ()
-        missing = [f for f in self.cfg.payment_detail_fields
-                   if f not in p.details and f not in p.details_asked and f not in on_receipt]
-        if not missing:
-            await self._escalate(ctx, reason=f"{p.kind} not received for ~{p.wait_hours:g}h (> 24h)")
+
+        methods = self._geo_methods(d)
+        method = p.details.get("method")
+        if method and methods and method not in methods and not p.method_clarified and method != OTHER_METHOD:
+            # п.6: the user's words did not match a method of the GEO -> clarify with buttons, once
+            p.method_clarified = True
+            p.details["method_user_words"] = method
+            del p.details["method"]
+            self._await(d, "payment_details")
+            p.details_asked.append("method")
+            await self._say(ctx, Task.COLLECT_PAYMENT_DETAILS, missing="method", options=self._method_options(d),
+                            facts=(f"the user described the method as «{method}»: ask which of the buttons it is",))
             return
-        p.details_asked.append(missing[0])
-        self._await(d, "payment_details")
-        await self._say(ctx, Task.COLLECT_PAYMENT_DETAILS, missing=missing[0])
+
+        for group in self.cfg.payment_detail_groups:
+            todo = [f for f in group if f not in p.details]
+            if not todo:
+                continue
+            if group == ("receipt",):
+                if p.receipt_asks >= 2 or (p.receipt_asks == 1 and asked != "receipt"):
+                    continue  # asked twice: hand over without it (п.10)
+                p.receipt_asks += 1
+                again = p.receipt_asks == 2
+                p.details_asked.append("receipt")
+                self._await(d, "payment_details")
+                await self._say(ctx, Task.COLLECT_PAYMENT_DETAILS, missing="receipt",
+                                facts=("the receipt has NOT been received yet: ask for it once more, briefly; if the "
+                                       "user cannot send it, the case goes to a colleague without it",) if again else ())
+                return
+            asked_before = {f for x in p.details_asked for f in x.split("+")}
+            if any(f in asked_before for f in todo):
+                continue  # every item is asked once
+            missing = "+".join(todo)
+            p.details_asked.append(missing)
+            self._await(d, "payment_details")
+            await self._say(ctx, Task.COLLECT_PAYMENT_DETAILS, missing=missing,
+                            options=self._detail_options(d, missing))
+            return
+        await self._escalate(ctx, reason=f"{p.kind} not received for ~{p.wait_hours:g}h (> 24h)")
+
+    def _detail_options(self, d: Dialogue, missing: str | None) -> tuple[Option, ...]:
+        return self._method_options(d) if missing == "method" else ()
+
+    @staticmethod
+    def _describe_when(when: dict) -> str:
+        parts = [str(when[k]) for k in ("date", "weekday", "time", "part_of_day") if when.get(k)]
+        if when.get("days_ago") is not None:
+            parts.insert(0, f"{when['days_ago']} day(s) ago")
+        return " ".join(parts) + " (client's words)"
 
     def _attempt_limit(self, d: Dialogue, issue: Issue) -> int:
         if d.payment and d.payment.within_norm and issue.key == d.payment.kind:
@@ -482,7 +662,12 @@ class Engine:
         d = ctx.d
         d.escalation_reason = reason
         ctx.out.add(NoteToOperator(self._operator_summary(d, reason, ctx.analysis)))
-        await self._say(ctx, task, check=False)
+        facts: tuple[str, ...] = ()
+        if d.payment and d.payment.over_threshold:
+            got = [k for k in ("method", "amount", "paid_at", "wallet") if k in d.payment.details]
+            receipt = "received" if "receipt" in d.payment.details else "NOT received - do not say it is attached"
+            facts = (f"collected for the colleague: {', '.join(got) or 'nothing'}; receipt/screenshot: {receipt}",)
+        await self._say(ctx, task, check=False, facts=facts)
         ctx.out.add(HandOff())
         d.handed_off = True
         d.awaiting = None
@@ -542,7 +727,7 @@ class Engine:
             history=tuple(d.history[-self.cfg.history_limit:]),
             previous_bot_texts=d.bot_texts(),
             aggressive=a.aggressive,
-            facts=facts,
+            facts=facts + self._context_facts(d, task),
             missing_detail=missing,
             previous_contact=d.previous_contact,
         )
@@ -556,37 +741,98 @@ class Engine:
         d.introduced = True
         if task in (Task.ANSWER, Task.PAYMENT_WITHIN_NORM) and d.current:
             d.issues[d.current].last_result = composed.result
-        opts = options or composed.options
+        opts = options or tuple(o for o in composed.options if not _OPERATOR_LABEL.search(o.label)
+                                and not self._mixed_script(o.label, d))  # п.4, п.24
         if task in (Task.HANDOFF, Task.GOODBYE, Task.RISK_SUPPORT):
             opts = ()  # the bot leaves the chat / the dialogue is over: nothing to tap
         d.offered = {o.id: o.label for o in opts if not o.id.startswith(("cat:", "q:", "wait:", "confirm:"))}
-        d.history.append(Turn("bot", composed.text))
-        text = composed.text
+        text = self._finish_text(composed.text, task, d)
+        d.history.append(Turn("bot", text))
         if ctx.pivot and d.language != self.policy.pivot:
             translated = await self.translator.from_pivot([text, *[o.label for o in opts]], self.policy.pivot,
                                                           d.language)
-            text, labels = translated[0], translated[1:]
+            text, labels = self._finish_text(translated[0], task, d), translated[1:]
             opts = tuple(Option(o.id, lbl) for o, lbl in zip(opts, labels))
         else:
-            fixed = tuple(o for o in opts if not o.id.startswith("free:"))  # model buttons are already localized
+            # model buttons are already localized; payment method names stay as they are
+            fixed = tuple(o for o in opts if not o.id.startswith("free:")
+                          and not (o.id.startswith("method:") and o.id != "method:other"))
             localized = dict(zip([o.id for o in fixed], await self._localize(fixed, d.language)))
             opts = tuple(localized.get(o.id, o) for o in opts)
         ctx.out.add(Say(text, opts, ctx.reply_to, composed.result, d.issue.category if d.current else None))
+
+    def _mixed_script(self, label: str, d: Dialogue) -> bool:
+        """п.24: a model button in a non-Latin reply language with Latin words inside ("مش عارف أف open السجل")."""
+        if d.language not in ("ar", "am", "ky", "ru"):
+            return False
+        rest = label
+        for m in self._geo_methods(d) + ["AvaBet", "Ava.bet", "ID", "SMS", "PIN", "KYC", "2FA", "Telegram", "e-mail"]:
+            rest = re.sub(re.escape(m), "", rest, flags=re.I)
+        return bool(re.search(r"[A-Za-z]{2,}", rest))
+
+    def _context_facts(self, d: Dialogue, task: Task) -> tuple[str, ...]:
+        """Facts every reply may need: GEO payment methods (п.6/24) and the support contact by language (п.15)."""
+        facts: list[str] = []
+        topic = d.payment.kind if d.payment else d.issue.category if d.current else None
+        if topic in PAYMENT_KINDS or task in (Task.CLARIFY_PAYMENT_KIND, Task.COLLECT_PAYMENT_DETAILS):
+            methods = self._geo_methods(d)
+            if methods:
+                facts.append(f"payment methods available in the user's GEO ({d.country}): {', '.join(methods)}. "
+                             "List or suggest only these")
+            else:
+                facts.append("the payment methods of the user's GEO are not known: do not list or suggest specific "
+                             "methods, if needed ask the user to write the method")
+            named = d.payment.details.get("method") if d.payment else None
+            facts.append(f"payment method named by the user: {named}" if named else
+                         "the user has NOT named a payment method: do not name or assume one")
+        support = "support-ar@ava.bet" if d.language == "ar" else "support-en@ava.bet"
+        facts.append(f"general support e-mail for this user: {support}; payments: payment-support@ava.bet or "
+                     "Telegram @AVAPayment_bot; closing the account / self-exclusion: block@ava.bet; documents: security@ava.bet; "
+                     "becoming an agent: Telegram @payment_assistment_avabet_bot; partnership: info@ava.bet. "
+                     "Give only the contact that fits the question, no other addresses")
+        return tuple(facts)
+
+    def _finish_text(self, text: str, task: Task, d: Dialogue) -> str:
+        """Plain text for Consultant (п.16), contact by language (п.15), handoff without a question (п.13),
+        the question to the user in its own paragraph (п.25)."""
+        if not self.cfg.markdown:
+            text = _MARKDOWN.sub(lambda m: m.group(1) or m.group(2), text)
+        if d.language == "ar":
+            text = text.replace("support-en@ava.bet", "support-ar@ava.bet")
+        text = text.strip()
+        sentences = [x for x in _split_sentences(text) if x.strip()]
+        if task in (Task.HANDOFF, Task.RISK_SUPPORT):
+            while len(sentences) > 1 and sentences[-1].rstrip().endswith(("?", "؟")):
+                text = text[:text.rstrip().rfind(sentences[-1].strip())].rstrip()
+                sentences = sentences[:-1]
+            return text
+        if len(sentences) > 1 and sentences[-1].rstrip().endswith(("?", "؟")):
+            last = sentences[-1].strip()
+            head = text[:text.rfind(last)].rstrip()
+            if head and not text[:text.rfind(last)].endswith("\n\n"):
+                text = head + "\n\n" + last
+        return text
 
     async def _checked(self, req: ComposeRequest, composed):
         sources = [self.kb.document(), *(t.text for t in req.history if t.role in ("user", "operator")),
                    req.user_text, *req.facts, *(o.label for o in composed.options)]
         result = check_reply(composed.text, sources=sources)
+        if req.task not in (Task.HANDOFF, Task.RISK_SUPPORT) and promises_handoff(composed.text):  # п.4
+            result = replace(result, problems=result.problems + (
+                "promises to connect / pass to an operator, but there is no hand-off: never say that",))
         if result.ok:
             return composed
         log.warning("fact check failed (%s): %s", req.task.value, "; ".join(result.problems))
+        note("fact_check_failed")
         retry = await self.llm.compose(replace(req, fix_hint=result.hint()))
-        if check_reply(retry.text, sources=sources).ok:
+        if check_reply(retry.text, sources=sources).ok and not (
+                req.task not in (Task.HANDOFF, Task.RISK_SUPPORT) and promises_handoff(retry.text)):
             return retry
         return await self._fallback(req)
 
     async def _fallback(self, req: ComposeRequest) -> Composed:
         """Last resort: the KB answer as is (no styling) or a fixed text for the task."""
+        note("fallback")
         if req.kb and req.task in (Task.ANSWER, Task.PAYMENT_WITHIN_NORM):
             text, result = req.kb[0].answer, "Full"
         else:
@@ -623,6 +869,23 @@ class Engine:
         return tuple(Option(o.id, lbl) for o, lbl in zip(options, labels))
 
     def _parse_variant(self, variant: str, d: Dialogue) -> dict:
+        if variant in TOP_BY_ID:
+            _, label, category, question = TOP_BY_ID[variant]
+            forced = {"category": category, "question": question}
+            if variant.endswith("_missing"):
+                forced["payment_issue"] = category
+            return forced
+        if variant == "pay:charged":
+            kind = d.current if d.current in PAYMENT_KINDS else "deposit"
+            return {"category": kind, "payment_issue": kind, "question": f"{kind} charged but not credited"}
+        if variant == "pay:failed":
+            kind = d.current if d.current in PAYMENT_KINDS else "deposit"
+            return {"category": kind, "question": f"{kind} payment failed with an error"}
+        if variant.startswith("method:"):
+            idx = variant.split(":", 1)[1]
+            methods = self._geo_methods(d)
+            method = OTHER_METHOD if idx == "other" else methods[int(idx)] if idx.isdigit() and int(idx) < len(methods) else None
+            return {"method": method, "label": method} if method else {}
         if variant.startswith("wait:"):
             return {"wait_hours": {o.id: h for o, h in WAIT_OPTIONS}.get(variant)}
         if variant.startswith("confirm:"):
@@ -653,6 +916,10 @@ class Engine:
         if forced.get("confirmation") in ("yes", "no"):
             changes.update(confirmation=forced["confirmation"], gratitude=False, understood=True, noise=False,
                            signal="closing" if forced["confirmation"] == "yes" else "not_helped")
+        if forced.get("payment_issue"):
+            changes.update(payment_issue=forced["payment_issue"], payment_unclear=False)
+        if forced.get("method"):
+            changes.update(payment_details={**a.payment_details, "method": forced["method"]}, signal="progress")
         if forced.get("label"):
             changes.update(understood=True, noise=False)
             if a.signal in (None, "noise", "not_understood"):
@@ -711,42 +978,35 @@ class Engine:
                 d.history.append(Turn("operator", it.text))
                 d.operator_joined = True
 
+    def _tz(self, d: Dialogue) -> ZoneInfo | None:
+        """The user's time zone: from the platform, else from the GEO; None without GEO (test review п.5)."""
+        for name in (d.timezone, COUNTRY_TZ.get((d.country or "").upper())):
+            if name:
+                try:
+                    return ZoneInfo(name)
+                except Exception:  # unknown zone name
+                    continue
+        return None
+
     def _now_local(self, d: Dialogue) -> str | None:
-        now = self._clock()
-        if d.timezone:
-            try:
-                return now.astimezone(ZoneInfo(d.timezone)).strftime(f"%Y-%m-%d %H:%M ({d.timezone})")
-            except Exception:  # unknown zone name
-                pass
-        return now.strftime("%Y-%m-%d %H:%M (UTC)")
+        tz = self._tz(d)
+        if tz is None:
+            return None  # no GEO: the model must not resolve clock times (п.5)
+        return self._clock().astimezone(tz).strftime(f"%A %Y-%m-%d %H:%M ({tz.key})")
 
     def _deadline_facts(self, d: Dialogue, hours: float, kind: str | None = None) -> tuple[str, ...]:
-        """Times computed by code, so the model never does date arithmetic.
+        """Facts computed by code, so the model never does date arithmetic.
 
-        The usual term comes from the KB (deposit: "from 1 minute to 12 hours"); the 24h threshold of
-        ТЗ 14.4 only decides about escalation and is never promised to the client.
+        Test review п.3/п.5: one deposit term, "within 24 hours", and no exact clock time of the deadline.
         """
-        now = self._clock()
-        tz = None
-        if d.timezone:
-            try:
-                tz = ZoneInfo(d.timezone)
-            except Exception:
-                tz = None
-        local_now = now.astimezone(tz) if tz else now
         facts = [f"time since the payment/request: about {hours:g} h"]
         usual = self.cfg.usual_payment_hours.get(kind or "")
         if usual is None:
-            facts.append("use the usual term exactly as the knowledge base states it")
-        elif hours < usual:
-            deadline = local_now - dt.timedelta(hours=hours) + dt.timedelta(hours=usual)
-            day = "today" if deadline.date() == local_now.date() else "tomorrow"
-            facts.append(f"usual term per the knowledge base: up to {usual:g} h, i.e. until about "
-                         f"{deadline:%H:%M} {day} (client's local time)")
+            facts.append("use the usual term exactly as the knowledge base states it; do not name a clock time")
         else:
-            facts.append(f"the usual term of the knowledge base (up to {usual:g} h) has passed, but it is still "
-                         "within the time when the case is not handed over: say that at peak load processing can "
-                         "take longer, ask to wait a little more, do not promise a time and do not say you checked")
+            facts.append(f"the usual term is within {usual:g} hours from the moment of the payment, and it has not "
+                         f"passed yet. Say exactly that («within {usual:g} hours»). Never name a clock time or a date "
+                         "when it ends and never another term")
         return tuple(facts)
 
     def _operator_summary(self, d: Dialogue, reason: str, a: Analysis) -> str:
@@ -762,11 +1022,15 @@ class Engine:
         if p:
             wait = f"{p.wait_hours:g}h" if p.wait_hours is not None else "not provided"
             lines.append(f"PAYMENT CASE: {p.kind}, waiting: {wait}")
-            for k in self.cfg.payment_detail_fields:
+            for k in ("method", "method_user_words", "amount", "paid_at", "wallet", "receipt", "receipt_note"):
                 if k in p.details:
                     lines.append(f"  {k}: {p.details[k]}")
+            if "receipt" not in p.details:
+                lines.append("  receipt / screenshot: not received")
         if a.aggressive or a.complaint or (p and p.pushback):
             lines.append("Note: the client is upset")
+        if d.account_number:
+            lines.append(f"Account number given by the user: {d.account_number}")
         if d.previous_contact:
             lines.append(f"Previous contact: {d.previous_contact}")
         lines.append("Last user messages:")

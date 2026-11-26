@@ -111,7 +111,7 @@ def create_demo_app(seed: int | None = None) -> FastAPI:
     async def deliver(event: dict, chat_id: str | None) -> dict:
         before = len(consultant.sent)
         dispatcher.submit(parse_event(event))
-        await dispatcher.drain()
+        await dispatcher.drain(chat=chat_id)
         new = consultant.sent[before:]
         if chat_id:
             new = [r for r in new if r.get("chatId") in (chat_id, None)]

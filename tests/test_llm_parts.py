@@ -226,11 +226,17 @@ async def test_deepseek_adapter_json_mode_and_cached_prefix():
         seen.append(json.loads(request.content))
         assert request.headers["Authorization"] == "Bearer k"
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answers.pop(0))},
-                                                      "finish_reason": "stop"}], "usage": {}})
+                                                      "finish_reason": "stop"}],
+                                         "usage": {"prompt_tokens": 1200, "prompt_cache_hit_tokens": 1000,
+                                                   "completion_tokens": 30}})
+
+    from support_bot.monitoring import begin_turn
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     llm = DeepSeekLLM("k", "## Забыл пароль {#account-1}\nНажмите **Забыли пароль**.", http=http)
+    turn = begin_turn()
     a = await llm.analyze(AnalyzeRequest(text="забыл пароль"))
+    assert (turn.llm_calls, turn.tokens_in, turn.tokens_cached, turn.tokens_out) == (1, 1200, 1000, 30)
     assert a.payment_issue == "deposit"
     persona = PersonaRegistry.from_file(rng=random.Random(1)).assign("KE")
     c = await llm.compose(ComposeRequest(task=Task.ANSWER, persona=persona, language="ru", user_text="забыл пароль"))
@@ -238,7 +244,7 @@ async def test_deepseek_adapter_json_mode_and_cached_prefix():
     sys0, sys1 = seen[0]["messages"][0]["content"], seen[1]["messages"][0]["content"]
     prefix = llm.prefix
     assert sys0.startswith(prefix) and sys1.startswith(prefix)  # identical prefix -> DeepSeek cache hit
-    assert seen[0]["response_format"] == {"type": "json_object"} and "json" in sys0.lower()
+    assert "response_format" not in seen[0] and "json" in sys0.lower()  # plain request first
 
     tr = DeepSeekTranslator("k", http=http)
     assert await tr.to_pivot("Nimesahau nenosiri", "ru") == ("забыл пароль", "sw")
@@ -254,3 +260,25 @@ def test_loose_json_from_non_strict_providers_is_validated():
     assert a.payment_issue == "deposit" and a.signal is None and a.wait_hours == 25.0
     assert a.risk is None and a.aggressive is True and a.category == "deposit"
     assert a.payment_details == {"method": "Visa"}
+
+
+async def test_deepseek_falls_back_to_json_mode_when_plain_answer_is_not_json():
+    import httpx
+
+    from support_bot.core.deepseek_llm import DeepSeekLLM
+    from support_bot.monitoring import begin_turn
+
+    modes: list[bool] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        modes.append("response_format" in body)
+        content = json.dumps(ANALYSIS) if body.get("response_format") else "   "
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]})
+
+    llm = DeepSeekLLM("k", "## Забыл пароль {#account-1}\nНажмите **Забыли пароль**.",
+                      http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    turn = begin_turn()
+    assert (await llm.analyze(AnalyzeRequest(text="забыл пароль"))).payment_issue == "deposit"
+    assert modes == [False, True] and turn.llm_calls == 2
+    assert turn.llm_errors and "plain" in turn.llm_errors[0] and "finish=stop" in turn.llm_errors[0]

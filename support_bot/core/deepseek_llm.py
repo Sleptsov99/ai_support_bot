@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
 
+from ..monitoring import record_llm
 from .claude_llm import ClaudeConfig, ClaudeLLM, ClaudeTranslator, LLMUnavailable
 
 log = logging.getLogger(__name__)
@@ -34,6 +36,8 @@ def _shape(schema: dict) -> str:
 
 
 def _example(schema: dict) -> Any:
+    if "anyOf" in schema:  # e.g. an object or null: show the object
+        return _example(schema["anyOf"][0])
     t = schema.get("type")
     t = t[0] if isinstance(t, list) else t
     if t == "object":
@@ -83,8 +87,9 @@ class _DeepSeekTransport:
                         "JSON schema (all listed keys present, null where unknown):\n" + _shape(schema)
                         + "\nExample of the shape:\n" + json.dumps(_example(schema), ensure_ascii=False))
         last_error = ""
-        # DeepSeek's JSON mode sometimes returns only whitespace: retry cooler, then without JSON mode.
-        for attempt, (temperature, json_mode) in enumerate(((0.7, True), (0.3, True), (0.3, False))):
+        # DeepSeek's JSON mode (response_format=json_object) often returns empty content on our long prompt,
+        # while a plain request with "return json only" works: plain first, JSON mode as the second try.
+        for attempt, (temperature, json_mode) in enumerate(((0.3, False), (0.3, True), (0.7, False))):
             body: dict[str, Any] = {
                 "model": model,
                 "messages": [{"role": "system", "content": system_text}, *messages],
@@ -95,25 +100,38 @@ class _DeepSeekTransport:
                 body["response_format"] = {"type": "json_object"}
             else:
                 body["messages"].append({"role": "user", "content": "Return the json object now, nothing else."})
+            started = time.monotonic()
+            ms = lambda: (time.monotonic() - started) * 1000  # noqa: E731
             try:
                 resp = await self.http.post(f"{self.base_url}/chat/completions", json=body,
                                             headers={"Authorization": f"Bearer {self.api_key}"})
             except httpx.HTTPError as exc:
+                record_llm(model, ms(), error=f"network: {exc}")
                 raise LLMUnavailable(f"network: {exc}") from exc
             if resp.status_code != 200:
+                record_llm(model, ms(), error=f"HTTP {resp.status_code}: {resp.text[:200]}")
                 raise LLMUnavailable(f"HTTP {resp.status_code}: {resp.text[:300]}")
             data = resp.json()
             usage = data.get("usage") or {}
-            log.debug("deepseek %s: in=%s cache_hit=%s out=%s", model, usage.get("prompt_tokens"),
-                      usage.get("prompt_cache_hit_tokens"), usage.get("completion_tokens"))
             choice = (data.get("choices") or [{}])[0]
             content = (choice.get("message") or {}).get("content") or ""
-            if choice.get("finish_reason") == "length":
+            finish = choice.get("finish_reason")
+            parsed = _parse(content) if finish != "length" else None
+            error = None
+            if parsed is None:
+                mode = "json mode" if json_mode else "plain"
+                error = (f"bad json, attempt {attempt + 1} ({mode}, finish={finish}, "
+                         f"{len(content)} chars: {content[:60]!r})")
+            record_llm(model, ms(), tokens_in=usage.get("prompt_tokens"),
+                       tokens_cached=usage.get("prompt_cache_hit_tokens"),
+                       tokens_out=usage.get("completion_tokens"), error=error)
+            log.debug("deepseek %s: in=%s cache_hit=%s out=%s", model, usage.get("prompt_tokens"),
+                      usage.get("prompt_cache_hit_tokens"), usage.get("completion_tokens"))
+            if finish == "length":
                 raise LLMUnavailable("max_tokens")
-            parsed = _parse(content)
             if parsed is not None:
                 return parsed
-            last_error = f"bad json on attempt {attempt + 1}: {content[:80]!r}"
+            last_error = error or ""
             log.info("deepseek: %s", last_error)
         raise LLMUnavailable(last_error or "empty answer")
 

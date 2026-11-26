@@ -1,0 +1,83 @@
+{
+  "_source": "Google Sheet 'Методы по гео' (deposit methods). Withdrawal buttons use the same list until a separate withdrawal list is given.",
+  "geo": {
+    "EG": {
+      "name": "Egypt",
+      "deposit": [
+        "Vodafone Cash",
+        "Etisalat Cash",
+        "Orange Cash",
+        "InstaPay",
+        "Crypto"
+      ]
+    },
+    "TZ": {
+      "name": "Tanzania",
+      "deposit": [
+        "Airtel Money",
+        "HaloPesa",
+        "Tigo Pesa (Yas)",
+        "M-Pesa (Vodacom)",
+        "Crypto"
+      ]
+    },
+    "ZM": {
+      "name": "Zambia",
+      "deposit": [
+        "MTN",
+        "Airtel",
+        "Zamtel",
+        "Crypto"
+      ]
+    },
+    "GH": {
+      "name": "Ghana",
+      "deposit": [
+        "MTN MoMo",
+        "Vodafone Cash",
+        "AirtelTigo",
+        "Crypto"
+      ]
+    },
+    "CI": {
+      "name": "Côte d’Ivoire",
+      "deposit": [
+        "Wave",
+        "MTN",
+        "Orange",
+        "Crypto"
+      ]
+    },
+    "NG": {
+      "name": "Nigeria",
+      "deposit": [
+        "OPay",
+        "PalmPay",
+        "Bank Transfer",
+        "Crypto"
+      ]
+    },
+    "CD": {
+      "name": "DR Congo",
+      "deposit": [
+        "Airtel Money",
+        "Orange Money",
+        "M-Pesa (Vodacom)",
+        "Crypto"
+      ]
+    },
+    "AR": {
+      "name": "Argentina",
+      "deposit": [
+        "Mercado Pago",
+        "Bank Transfer (CBU/CVU)",
+        "Lemon Cash",
+        "Naranja X",
+        "Ualá",
+        "Prex",
+        "Brubank",
+        "Crypto"
+      ]
+    }
+  }
+}

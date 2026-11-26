@@ -197,9 +197,10 @@ async def test_group_d_never_escalates(h: Harness):
     assert "InvokeOperator" not in h.consultant.types()
 
 
-async def test_complaint_allows_earlier_escalation(h: Harness):
+async def test_complaint_is_handled_by_the_bot_first(h: Harness):
+    # test review п.1/12: accusations of fraud are not a reason for L1 at once, the usual cycle applies
     await h.send(set_chat())
-    for _ in range(2):
+    for _ in range(5):
         await h.send(msg("this is a scam, I will complain"))
     assert "InvokeOperator" not in h.consultant.types()
     await h.send(msg("complain!"))
@@ -217,21 +218,26 @@ async def test_payment_without_time_asks_for_time_then_collects_details_over_24h
     assert "InvokeOperator" not in h.consultant.types()
 
     await h.send(msg("3 days already"))
-    assert "method" in h.consultant.last_text("chat1")  # dialogue 4: collect data for L1 first
-    receipt = [{"$type": "MediaPhoto", "id": "r1", "mimeType": "image/jpeg", "size": 10}]
-    await h.send(msg("Vodafone Cash"), msg(None, media=receipt), msg("01001982785"))
+    reply = h.consultant.for_chat("chat1")[-1]
+    assert "method" in reply["text"]  # dialogue 4: collect data for L1 first
+    labels = [b["text"] for b in reply["replyMarkup"]["buttons"]]
+    assert labels[:5] == ["Vodafone Cash", "Etisalat Cash", "Orange Cash", "InstaPay", "Crypto"]  # п.6: EG list
+    await h.send(msg("Vodafone Cash"), msg("1000, yesterday at 8:40"), msg("01001982785"))
     assert "InvokeOperator" not in h.consultant.types()
-    await h.send(msg("01098765432"))
+    receipt = [{"$type": "MediaPhoto", "id": "r1", "mimeType": "image/jpeg", "size": 10}]
+    await h.send(msg(None, media=receipt))
     assert h.consultant.types("chat1")[-3:] == ["SupportBotMessage", "BotReplyMessage", "InvokeOperator"]
     note = h.consultant.for_chat("chat1")[-3]["text"]
     assert "deposit" in note and "72h" in note
-    assert "method: Vodafone Cash" in note and "receipt: attached" in note
-    assert "sender: 01001982785" in note and "recipient: 01098765432" in note
-    assert "amount" not in note.split("PAYMENT CASE")[1].split("Last user")[0]  # it is on the receipt
+    assert "method: Vodafone Cash" in note and "receipt: received" in note
+    assert "amount: 1000" in note and "wallet: 01001982785" in note
+    assert "recipient" not in note  # п.8: never asked
+    asked = " ".join(p.get("text") or "" for p in h.consultant.for_chat("chat1"))
+    assert "recipient" not in asked.lower()
 
 
 async def test_payment_over_24h_given_upfront_does_not_ask_time_again(h: Harness):
-    await h.send(set_chat(), msg("сделал депозит вчера утром на 1000, до сих пор не пришел", language="ru"))
+    await h.send(set_chat(), msg("сделал депозит 3 дня назад на 1000, до сих пор не пришел", language="ru"))
     d = await h.dialogue()
     assert d.payment.over_threshold and d.payment.details["amount"] == "1000"
     assert d.awaiting == "payment_details"
@@ -272,9 +278,10 @@ async def test_ambiguous_yesterday_is_clarified_once(h: Harness):
 
 
 async def test_payment_user_does_not_answer_wait_question_escalates(h: Harness):
-    await h.send(set_chat(), msg("deposit not arrived"), msg("call operator"))
-    assert "InvokeOperator" not in h.consultant.types()  # asked once more (dialogue 1 in the ТЗ)
-    await h.send(msg("operator!!!"))
+    # test review п.2: only after 3 messages in a row without an answer about the time
+    await h.send(set_chat(), msg("deposit not arrived"), msg("call operator"), msg("operator!!!"))
+    assert "InvokeOperator" not in h.consultant.types()
+    await h.send(msg("OPERATOR"))
     assert h.consultant.types()[-1] == "InvokeOperator"
 
 

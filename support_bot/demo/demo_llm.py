@@ -42,7 +42,7 @@ T = {
         "en": "Glad I could help 😊 If you have any other questions, just write!",
     },
     Task.HANDOFF: {
-        "ru": "Спасибо за терпение 🙏 Я передаю ваш вопрос специалисту поддержки, он продолжит диалог в этом чате.",
+        "ru": "Спасибо за терпение 🙏 Я передаю ваш вопрос специалисту поддержки вместе со всеми данными, он продолжит диалог в этом чате.",
         "en": "Thank you for your patience 🙏 I'm passing your question to a support specialist, they will continue in this chat.",
     },
     Task.NUDGE: {
@@ -58,30 +58,58 @@ T = {
         "en": "Could you tell me roughly how many hours it has been: less than a day or more?",
     },
     Task.COLLECT_PAYMENT_DETAILS: {
-        "method": {
-            "ru": "Понимаю, это действительно дольше обычного. Чтобы специалист сразу разобрался, подскажите, пожалуйста, каким способом вы платили?",
-            "en": "I understand, that's longer than usual. So that a specialist can check it right away, which payment method did you use?",
+        "deposit": {
+            "method": {
+                "ru": "Понимаю, это действительно дольше обычного. Чтобы специалист сразу разобрался, нужно несколько деталей.\n\nКаким способом вы платили?",
+                "en": "I understand, that's longer than usual. A few details will help a specialist check it right away.\n\nWhich payment method did you use?",
+            },
+            "amount+paid_at": {
+                "ru": "Спасибо! По сумме и времени специалист найдет платеж.\n\nНа какую сумму и когда примерно был платеж?",
+                "en": "Thank you! The amount and time help the specialist find the payment.\n\nWhat was the amount and roughly when did you pay?",
+            },
+            "wallet": {
+                "ru": "Хорошо.\n\nС какого номера кошелька или счета вы платили?",
+                "en": "Okay.\n\nWhich wallet or account number did you pay from?",
+            },
+            "receipt": {
+                "ru": "И последнее: скриншот чека из приложения кошелька, именно из кошелька, а не со страницы AvaBet. По нему платеж найдут быстрее.\n\nСможете прислать?",
+                "en": "One last thing: a screenshot of the receipt from the wallet app itself, not from the AvaBet page. It helps find the payment faster.\n\nCould you send it?",
+            },
         },
-        "receipt": {
-            "ru": "Спасибо. Теперь пришлите, пожалуйста, скриншот чека из приложения платежной системы, именно из кошелька, а не со страницы AvaBet. На нем видны номер получателя и номер операции, без него специалисты не найдут перевод.",
-            "en": "Thank you. Now please send a screenshot of the receipt from the payment app itself, not from the AvaBet page. It shows the recipient and the transaction number, without it the specialists can't find the transfer.",
+        "withdrawal": {
+            "method": {
+                "ru": "Понимаю, это дольше обычного. Чтобы специалист сразу разобрался, нужно несколько деталей.\n\nНа какой способ вы выводили?",
+                "en": "I understand, that's longer than usual. A few details will help a specialist check it right away.\n\nWhich method did you withdraw to?",
+            },
+            "amount+paid_at": {
+                "ru": "Спасибо!\n\nНа какую сумму и когда примерно вы создали заявку на вывод?",
+                "en": "Thank you!\n\nWhat was the amount and roughly when did you create the withdrawal request?",
+            },
+            "wallet": {
+                "ru": "Хорошо.\n\nКакой номер кошелька указан в заявке на вывод?",
+                "en": "Okay.\n\nWhich wallet number is in the withdrawal request?",
+            },
+            "receipt": {
+                "ru": "И последнее: скриншот заявки из истории в AvaBet.\n\nСможете прислать?",
+                "en": "One last thing: a screenshot of the request from your AvaBet history.\n\nCould you send it?",
+            },
         },
-        "amount": {
-            "ru": "Спасибо! А на какую сумму был платеж?",
-            "en": "Thank you! And what was the amount?",
-        },
-        "sender": {
-            "ru": "Осталось два номера. С какого номера или счета вы переводили?",
-            "en": "Two numbers left. Which number or account did you pay from?",
-        },
-        "recipient": {
-            "ru": "Спасибо. А номер, на который вы переводили? Его можно найти в деталях перевода в приложении кошелька.",
-            "en": "Thanks. And the number you sent it to? You can find it in the transfer details in the wallet app.",
-        },
-        "paid_at": {
-            "ru": "Хорошо. Подскажите, пожалуйста, примерную дату и время платежа?",
-            "en": "Okay. What was the approximate date and time of the payment?",
-        },
+    },
+    Task.GREET: {
+        "ru": "Здравствуйте!\n\nЧем могу помочь?",
+        "en": "Hello!\n\nHow can I help you?",
+    },
+    Task.RESPONSIBLE_GAMING: {
+        "ru": "Понимаю, проигрыш очень расстраивает. Пополнять счет, чтобы отыграться, обычно только усиливает потери.\n\nВ разделе «Ответственная игра» можно поставить лимит на депозиты, взять паузу или включить самоисключение.",
+        "en": "I understand, losing is really upsetting. Depositing to win it back usually only makes the losses bigger.\n\nIn the Responsible Gaming section you can set deposit limits, take a break or self-exclude.",
+    },
+    Task.CLARIFY_PAYMENT_KIND: {
+        "ru": "Давайте разберемся.\n\nПлатеж не прошел с ошибкой или деньги списались, но не пришли на баланс?",
+        "en": "Let's figure it out.\n\nDid the payment fail with an error, or was the money charged but not credited?",
+    },
+    Task.ACCOUNT_NUMBER: {
+        "ru": "Спасибо, номер счета записал.\n\nПодскажите, какой у вас вопрос?",
+        "en": "Thank you, I've noted your account number.\n\nWhat is your question?",
     },
     Task.RISK_SUPPORT: {
         "ru": "Спасибо, что написали об этом 🙏 Мне очень жаль, что вам сейчас тяжело. Я подключаю коллегу, он поможет с ограничением игры и подскажет, куда можно обратиться за поддержкой.",
@@ -142,6 +170,11 @@ RU_LABELS = {
     "File a complaint": "Подать жалобу", "Complain about operator": "Жалоба на оператора",
     "Become an agent": "Стать агентом", "Become a partner": "Стать партнером", "Affiliate program info": "Партнерская программа",
     "Propose cooperation": "Предложить сотрудничество", "Track referral stats": "Статистика рефералов",
+    "Deposit not received": "Депозит не пришел", "How to top up": "Как пополнить счет",
+    "Payment request status": "Статус платежа", "Withdrawal not received": "Вывод не пришел",
+    "Can't log in": "Не могу войти", "Bonuses & promo codes": "Бонусы и промокоды",
+    "Payment failed": "Платеж не прошел", "Charged, not on balance": "Списались, не пришли",
+    "Other method": "Другой способ",
 }
 CATEGORY_PROMPT = ": please choose a question or type your own."
 
@@ -182,13 +215,22 @@ class DemoLLM(FakeLLM):
                 idx += 1  # never repeat the previous message word for word (ТЗ 14.3)
             text = ATTEMPTS[lg][idx]
             return Composed(intro + text, "NotFound" if req.attempt < 4 else "Partial", opts)
+        if t is Task.GREET and intro:
+            return Composed(intro + {"ru": "Чем могу помочь?", "en": "How can I help you?"}[lg], "Partial")
         if t is Task.ASK_WAIT_TIME:
             text = T[t][req.payment_kind or "deposit"][lg]
             return Composed(intro + text, "Partial")
         if t is Task.PAYMENT_WITHIN_NORM:
             return Composed(intro + T[t][lg] + (self._kb_answer(req) or ""), "Full")
         if t is Task.COLLECT_PAYMENT_DETAILS:
-            text = T[t].get(req.missing_detail or "method", T[t]["method"])[lg]
+            table = T[t].get(req.payment_kind or "deposit", T[t]["deposit"])
+            text = table.get(req.missing_detail or "method", table["method"])[lg]
+            if req.missing_detail == "method" and any("described the method" in f for f in req.facts):
+                text = {"ru": "Уточните, пожалуйста, какой это из способов ниже?",
+                        "en": "Could you tell me which of the methods below it is?"}[lg]
+            if req.missing_detail == "receipt" and any("NOT been received" in f for f in req.facts):
+                text = {"ru": "Чек пока не пришел. Если сможете, пришлите скриншот из приложения кошелька, если нет, передам без него.",
+                        "en": "The receipt hasn't arrived yet. If you can, send a screenshot from the wallet app; if not, I'll pass it on without it."}[lg]
             return Composed(intro + text, "Partial")
         result = {"CLARIFY_UNRECOGNIZED": "NotFound", "MEDIA_UNREADABLE": "NotFound", "OFF_TOPIC": "NotFound",
                   "NUDGE": "Partial", "CLARIFY_WAIT_TIME": "Partial", "RISK_SUPPORT": "Partial",

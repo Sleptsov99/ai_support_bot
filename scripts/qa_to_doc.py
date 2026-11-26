@@ -187,6 +187,62 @@ def convert(rows: list[list[str]]) -> tuple[list[KBEntry], dict[str, str]]:
     return entries, section_keywords
 
 
+# Corrections from the test review («Правки по тестам AI Support бота», Nov 2026): the sheet is older than
+# these decisions. Applied to the generated document, so regenerating the KB keeps them.
+LIMITS_ANSWER = ("Минимальные и максимальные суммы пополнения и вывода зависят от способа оплаты и условий платежных "
+                 "методов, поэтому иногда они могут обновляться.\n\nАктуальные лимиты для вашего способа оплаты "
+                 "всегда указаны в форме пополнения или вывода: выберите метод, и суммы будут показаны в его окне.")
+CORRECTIONS: list[tuple[str, str]] = [
+    # п.3: one deposit term everywhere - up to 24 hours
+    ("Пополнение счета занимает от 1 минуты до 12 часов", "Пополнение счета занимает от нескольких минут до 24 часов"),
+    # п.17: verification takes up to 24 hours; agents write to the Payment Assistant Bot
+    ("до 72 часов", "до 24 часов"),
+    ("<@AVA_managment>", "<@payment_assistment_avabet_bot>"),
+    # п.7: limits - a prepared answer, no invented reasons ("set by the payment system", "try later")
+    ("При формировании запроса на пополнение счета будет отображена минимальная и максимальная сумма депозита. Лимит "
+     "на пополнение устанавливает сторонняя платежная система, через которую проводится перевод.\n\nРекомендуем "
+     "повторить попытку позднее, либо воспользоваться альтернативными способами пополнения.", LIMITS_ANSWER),
+    ("При формировании запроса на вывод денежных средств, будет отображена максимальная и минимальная сумма вывода. "
+     "Лимит на вывод денежных средств устанавливает сторонняя платежная система, через которую проводится перевод.",
+     LIMITS_ANSWER),
+    ("Максимальная сумма зависит от способа оплаты. Актуальные лимиты указаны на странице пополнения рядом с каждым "
+     "методом.", LIMITS_ANSWER),
+    # п.4: "5th time asks for an operator" is decided by the engine, the text must not promise a transfer itself
+    ("Понял(а) вас. Передаю обращение оператору.", "note: передачу оператору решает система, сам бот её не обещает"),
+    ("\n\nТакже передаю ваше обращение живому специалисту прямо сейчас.", "\nnote: передачу оператору решает система"),
+    ("Если хотите поговорить с живым оператором:", "Если удобнее написать в поддержку:"),
+    ("\n\nЕсли вопрос срочный — я прямо сейчас передаю обращение оператору.", ""),    ('Я передам ваше обращение специалисту для разбора.', 'note: передачу оператору решает система, сам бот её не обещает'),
+    (' Я также прямо сейчас передаю информацию старшему специалисту.', ''),
+    ('С этими данными я передам ваш запрос специалисту для детальной проверки расчёта.', 'Эти данные помогут разобраться в расчёте.\nnote: передачу оператору решает система, сам бот её не обещает'),
+    ('Я немедленно передаю ваше обращение старшему специалисту.', 'note: передачу оператору решает система, сам бот её не обещает'),
+    ('Прямо сейчас передаю ваше обращение специалисту, который сможет рассмотреть ситуацию детально.', 'note: передачу оператору решает система, сам бот её не обещает'),
+]
+# п.15: one directory of contacts by language and topic
+CONTACTS_DIRECTORY = """## Справочник контактов поддержки {#contacts-directory}
+note: единственный источник контактов для ответов. Общая поддержка: по языку игрока. Другие адреса из старых ответов не давать, кроме контактов партнерской программы в разделе Partnership.
+Общая поддержка (арабский язык): <support-ar@ava.bet>
+Общая поддержка (остальные языки): <support-en@ava.bet>
+Платежи (депозит, вывод): <payment-support@ava.bet> или Telegram <@AVAPayment_bot>
+Закрытие аккаунта, самоисключение: <block@ava.bet>
+Документы, запрос документов службой безопасности: <security@ava.bet>
+Стать агентом: Telegram <@payment_assistment_avabet_bot>
+Сотрудничество и партнерская программа: <info@ava.bet>
+
+"""
+
+
+def apply_corrections(doc: str) -> str:
+    for old, new in CORRECTIONS:
+        doc = doc.replace(old, new)
+    marker = "{#contacts}\n"
+    at = doc.find(marker)
+    if at >= 0 and "{#contacts-directory}" not in doc:
+        line_end = doc.find("\n## ", at)  # after the section keywords line
+        if line_end >= 0:
+            doc = doc[:line_end + 1] + CONTACTS_DIRECTORY + doc[line_end + 1:]
+    return doc
+
+
 def build_document(entries: list[KBEntry], section_keywords: dict[str, str], hints: dict[str, str]) -> str:
     order = [key for _, key, _ in BLOCKS]
     entries = sorted(entries, key=lambda e: order.index(e.category) if e.category in order else len(order))
@@ -207,7 +263,7 @@ def build_document(entries: list[KBEntry], section_keywords: dict[str, str], hin
     if section_keywords:  # keywords of a block go under its section header
         for key, kws in section_keywords.items():
             doc = doc.replace(f"{{#{key}}}\n", f"{{#{key}}}\nКлючевые слова раздела: {kws.replace(chr(10), ' ')}\n", 1)
-    return "\n".join(head) + doc
+    return apply_corrections("\n".join(head) + doc)
 
 
 def main() -> None:

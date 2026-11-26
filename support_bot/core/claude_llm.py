@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
+from ..monitoring import record_llm
 from .actions import Option
 from .language import SUPPORTED_LANGUAGES
 from .llm import Analysis, AnalyzeRequest, Composed, ComposeRequest
@@ -34,7 +36,8 @@ class LLMUnavailable(RuntimeError):
     pass
 
 
-PAYMENT_FIELDS = ("method", "receipt", "amount", "paid_at", "sender", "recipient")
+PAYMENT_FIELDS = ("method", "amount", "paid_at", "wallet", "receipt")
+WHEN_FIELDS = {"date": "string", "days_ago": "number", "weekday": "string", "time": "string", "part_of_day": "string"}
 
 
 def _nullable(t: str) -> dict:
@@ -52,6 +55,13 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
         "understood": {"type": "boolean"},
         "wants_operator": {"type": "boolean"},
         "payment_issue": {"type": ["string", "null"], "enum": ["deposit", "withdrawal", None]},
+        "payment_unclear": {"type": "boolean"},
+        "payment_when": {"anyOf": [{
+            "type": "object",
+            "properties": {k: _nullable(t) for k, t in WHEN_FIELDS.items()},
+            "required": list(WHEN_FIELDS),
+            "additionalProperties": False,
+        }, {"type": "null"}]},
         "wait_hours": _nullable("number"),
         "wait_hours_max": _nullable("number"),
         "confirmation": {"type": ["string", "null"], "enum": ["yes", "no", None]},
@@ -61,6 +71,9 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
         "off_topic": {"type": "boolean"},
         "noise": {"type": "boolean"},
         "risk": {"type": ["string", "null"], "enum": ["gambling_harm", "self_harm", "minor", None]},
+        "chasing_losses": {"type": "boolean"},
+        "greeting": {"type": "boolean"},
+        "account_number": _nullable("string"),
         "media_understood": {"type": "boolean"},
         "payment_details": {
             "type": "object",
@@ -127,6 +140,7 @@ class _Claude:
             output_config["effort"] = self.cfg.effort
         kwargs: dict[str, Any] = dict(model=model, max_tokens=self.cfg.max_tokens, system=system, messages=messages,
                                       output_config=output_config)
+        started = time.monotonic()
         try:
             if self.cfg.fallbacks:
                 resp = await self.client.beta.messages.create(
@@ -134,8 +148,15 @@ class _Claude:
             else:
                 resp = await self.client.messages.create(**kwargs)
         except Exception as exc:  # network, rate limit, overload: the engine has fallbacks
+            record_llm(model, (time.monotonic() - started) * 1000, error=f"{type(exc).__name__}: {exc}")
             raise LLMUnavailable(str(exc)) from exc
         usage = getattr(resp, "usage", None)
+        cached = getattr(usage, "cache_read_input_tokens", None) or 0
+        record_llm(model, (time.monotonic() - started) * 1000,
+                   tokens_in=((getattr(usage, "input_tokens", None) or 0) + cached
+                              + (getattr(usage, "cache_creation_input_tokens", None) or 0)) if usage else None,
+                   tokens_cached=cached, tokens_out=getattr(usage, "output_tokens", None) if usage else None,
+                   error=resp.stop_reason if resp.stop_reason in ("refusal", "max_tokens") else None)
         if usage is not None:
             log.debug("claude %s: in=%s cache_read=%s cache_write=%s out=%s", model,
                       getattr(usage, "input_tokens", None), getattr(usage, "cache_read_input_tokens", None),
@@ -156,6 +177,25 @@ class _Claude:
 _NULLISH = {"", "null", "none", "n/a", "unknown"}
 
 
+def _to_when(value: Any) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    when: dict[str, Any] = {}
+    for k, t in WHEN_FIELDS.items():
+        v = value.get(k)
+        if v is None or str(v).strip().lower() in _NULLISH:
+            continue
+        if t == "number":
+            try:
+                v = int(float(str(v).replace(",", ".")))
+            except ValueError:
+                continue
+        else:
+            v = str(v).strip().lower() if k in ("weekday", "part_of_day") else str(v).strip()
+        when[k] = v
+    return when or None
+
+
 def _to_analysis(data: dict) -> Analysis:
     """Validate the model's JSON (providers without strict schemas may send "Deposit", "null", "2", ...)."""
     props = ANALYSIS_SCHEMA["properties"]
@@ -167,6 +207,9 @@ def _to_analysis(data: dict) -> Analysis:
         if key == "payment_details" or key not in data:
             continue
         value = data[key]
+        if key == "payment_when":
+            out[key] = _to_when(value)
+            continue
         types = spec["type"] if isinstance(spec["type"], list) else [spec["type"]]
         if isinstance(value, str) and value.strip().lower() in _NULLISH and "null" in types:
             value = None

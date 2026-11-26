@@ -125,7 +125,10 @@ async def test_noise_never_counts_and_never_escalates(h: Harness):
     d = await h.dialogue()
     assert d.noise_count == 10 and all(i.failures == 0 for i in d.issues.values())
     texts = [p["text"] for p in h.consultant.sent if p["$type"] == "BotReplyMessage"]
-    assert "describe it in more detail" in texts[0] and "I'm here" in texts[1]
+    assert "How can I help" in texts[0]  # test review п.18: the first one is greeted, with top topics
+    first = [p for p in h.consultant.sent if p["$type"] == "BotReplyMessage"][0]
+    assert [b["id"] for b in first["replyMarkup"]["rows"]] == ["top:deposit_missing", "top:withdrawal_missing",
+                                                                  "top:login"]
 
 
 async def test_off_topic_is_redirected_and_not_escalated(h: Harness):

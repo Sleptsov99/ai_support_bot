@@ -36,6 +36,24 @@ FALSE_CLAIMS = [
     r"(платеж|платёж|депозит|вывод) (уже )?(одобрен|подтвержден|в пути)",
     r"гарантир", r"точно выиграете",
 ]
+# Test review п.4: "I'll connect you", "OK, I'll do it" in reply to "call an operator" without a hand-off.
+HANDOFF_PROMISES = [
+    r"\b(i'?ll|i will|let me|i'?m going to|going to) (now )?(connect|transfer|pass|forward|put) you",
+    r"\b(connect|transfer)(ing)? you (to|with)", r"\bpass(ing)? (you|your (request|case|chat)) (on |over )?to",
+    r"соедин(ю|яю)", r"переда(м|ю|ла|л)\s+(ваш|вас|обращ|диалог|запрос|чат)", r"переключ(у|аю)",
+    r"подключ(у|аю|ится|ается)\s+(оператор|специалист|коллег|сотрудник)", r"позову\s+(оператор|специалист)",
+    r"سأحول|سأوصل|سأقوم بتحويل|سيتم تحويل|أحولك|سأنقل|سيتواصل معك (أحد|زميل|موظف)",
+    r"vous (transférer|mettre en relation)|je vous (transf[eè]re|mets en relation)",
+    r"te (transfiero|comunico|paso con)|voy a (transferir|pasar)",
+    r"aktar(ıyorum|acağım)|bağl(ıyorum|ayacağım)",
+]
+_HANDOFF = [re.compile(p, re.I) for p in HANDOFF_PROMISES]
+
+
+def promises_handoff(text: str) -> bool:
+    return any(rx.search(text) for rx in _HANDOFF)
+
+
 _FORBIDDEN = [re.compile(p, re.I) for p in FORBIDDEN]
 _FALSE = [re.compile(p, re.I) for p in FALSE_CLAIMS]
 

@@ -22,12 +22,13 @@ async def test_demo_page_and_full_payment_escalation():
         assert r["state"]["group"] == "B"
 
         r = (await c.post("/demo/api/message", json={"chat_id": chat, "text": "уже 3 дня", "geo": "EG", "language": "ru"})).json()
-        assert "каким способом" in r["reactions"][-1]["text"]  # dialogue 4: collect data before L1
+        assert "Каким способом" in r["reactions"][-1]["text"]  # dialogue 4: collect data before L1
         assert r["state"]["group"].startswith("B (> 24ч")
-        for text in ["Vodafone Cash", "чека нет под рукой", "1000", "вчера в 8:40", "01001982785"]:
+        for text in ["Vodafone Cash", "1000, вчера в 8:40", "01001982785", "чека нет под рукой"]:
             r = (await c.post("/demo/api/message", json={"chat_id": chat, "text": text, "geo": "EG", "language": "ru"})).json()
             assert r["state"]["status"] == "активен"
-        r = (await c.post("/demo/api/message", json={"chat_id": chat, "text": "01098765432", "geo": "EG", "language": "ru"})).json()
+        # test review п.10: the receipt is asked once more, then the case goes without it
+        r = (await c.post("/demo/api/message", json={"chat_id": chat, "text": "нет его", "geo": "EG", "language": "ru"})).json()
         assert [x["$type"] for x in r["reactions"]] == ["SupportBotMessage", "BotReplyMessage", "InvokeOperator"]
         assert "method: Vodafone Cash" in r["reactions"][0]["text"]
         assert r["state"]["status"] == "передан L1"

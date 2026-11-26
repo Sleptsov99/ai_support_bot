@@ -1,0 +1,24 @@
+services:
+  bot:
+    build: .
+    container_name: ai_support_bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LOG_DIR: /app/logs
+    volumes:
+      - bot_logs:/app/logs   # turns-*.jsonl / errors-*.jsonl, survive restarts and rebuilds
+    # Only nginx on the same server can reach the bot; the outside world goes through nginx (HTTPS + password).
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
+
+volumes:
+  bot_logs:

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
 
 from .consultant.adapter import to_incoming, to_reactions
@@ -35,8 +36,9 @@ from .consultant.models import (
     UnknownEvent,
     UnsetChat,
 )
-from .core.actions import Outcome
+from .core.actions import HandOff, Outcome, Resolve, Say
 from .core.engine import Engine, IncomingMessage, PlatformMessage
+from .monitoring import MONITOR, begin_turn, mask
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +76,7 @@ class Dispatcher:
         self._timers: dict[str, asyncio.Task] = {}
         self._silence: dict[str, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
+        self._task_chat: dict[asyncio.Task, str] = {}  # which chat a task belongs to (per-chat drain)
 
     # ------------------------------------------------------------------ API
 
@@ -82,41 +85,51 @@ class Dispatcher:
         if isinstance(event, PingActivity):
             self._spawn(self._pong())
         elif isinstance(event, SetChat):
-            self._spawn(self._in_chat(event.chat_id, self._set_chat(event)))
+            self._spawn(self._in_chat(event.chat_id, self._set_chat(event)), event.chat_id)
         elif isinstance(event, UnsetChat):
             self._cancel_pending(event.chat_id)
-            self._spawn(self._in_chat(event.chat_id, self.engine.end_dialogue(event.chat_id, event.reason_type)))
+            self._spawn(self._in_chat(event.chat_id, self.engine.end_dialogue(event.chat_id, event.reason_type)),
+                        event.chat_id)
         elif isinstance(event, ClientMessage):
             self._buffer(to_incoming(event))
         elif isinstance(event, UnknownEvent):
             log.info("ignoring unknown event type %r", event.type_)
 
-    async def drain(self, include_silence: bool = False) -> None:
+    async def drain(self, include_silence: bool = False, chat: str | None = None) -> None:
         """Wait until all scheduled work is finished (tests, graceful shutdown).
 
-        Silence timers (minutes long) are not waited for unless asked.
+        Silence timers (minutes long) are not waited for unless asked. With ``chat``,
+        waits only for that chat's work, so parallel users do not wait for each other.
         """
         while True:
             waiting = set(self._silence.values())
-            tasks = [t for t in self._tasks if include_silence or t not in waiting]
+            tasks = [t for t in self._tasks if (include_silence or t not in waiting)
+                     and (chat is None or self._task_chat.get(t) == chat)]
             if not tasks:
                 return
             await asyncio.gather(*tasks, return_exceptions=True)
 
     # ------------------------------------------------------------ internals
 
-    def _spawn(self, coro) -> asyncio.Task:
+    def _spawn(self, coro, chat: str | None = None) -> asyncio.Task:
         task = asyncio.create_task(coro)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        if chat is not None:
+            self._task_chat[task] = chat
+        task.add_done_callback(self._forget)
         return task
+
+    def _forget(self, task: asyncio.Task) -> None:
+        self._tasks.discard(task)
+        self._task_chat.pop(task, None)
 
     async def _in_chat(self, chat_id: str, coro) -> None:
         async with self._locks[chat_id]:
             try:
                 await coro
-            except Exception:  # never let one chat break the dispatcher
+            except Exception as exc:  # never let one chat break the dispatcher
                 log.exception("error while processing chat %s", chat_id)
+                MONITOR.error("chat", f"{type(exc).__name__}: {exc}", chat_id)
 
     async def _pong(self) -> None:
         try:
@@ -125,8 +138,10 @@ class Dispatcher:
             log.exception("failed to send PongActivity")
 
     async def _set_chat(self, ev: SetChat) -> None:
+        stats, started = begin_turn(), time.monotonic()
         outcome = await self.engine.start_dialogue(ev.chat_id, ev.conversation_id)
         await self._send(ev.chat_id, outcome)
+        await self._record("start", ev.chat_id, outcome, stats, started)
 
     def _buffer(self, msg: IncomingMessage) -> None:
         chat = msg.chat_id
@@ -135,7 +150,7 @@ class Dispatcher:
         self._cancel_task(self._silence, chat)  # the user answered
         self._cancel_task(self._timers, chat)
         delay = self.fragment_debounce if _is_fragment(msg) else self.debounce
-        self._timers[chat] = self._spawn(self._flush_later(chat, delay))
+        self._timers[chat] = self._spawn(self._flush_later(chat, delay), chat)
 
     def _cancel_task(self, tasks: dict[str, asyncio.Task], chat: str) -> None:
         task = tasks.pop(chat, None)
@@ -172,12 +187,14 @@ class Dispatcher:
         if not msgs:
             return
         gen = self._gen[chat]
+        stats, started = begin_turn(), time.monotonic()
         result = await self.engine.run_turn(msgs, await self._history(chat))
         if self._gen[chat] != gen and self._supersedes[chat] < MAX_SUPERSEDES:
             # The user wrote again while we were thinking: drop this answer, the next flush
             # answers all messages at once. Nothing was saved, so nothing is counted twice.
             self._supersedes[chat] += 1
             log.info("chat %s: answer superseded by a newer message", chat)
+            await self._record("message", chat, result.outcome, stats, started, msgs, superseded=True)
             return
         await self.engine.commit(result)
         self._supersedes[chat] = 0
@@ -188,6 +205,7 @@ class Dispatcher:
         else:
             self._pending.pop(chat, None)
         await self._send(chat, result.outcome)
+        await self._record("message", chat, result.outcome, stats, started, msgs)
         if result.silence_timeout:
             self._arm_silence(chat, result.silence_timeout)
 
@@ -200,7 +218,7 @@ class Dispatcher:
                 self._silence.pop(chat, None)
             await self._in_chat(chat, self._on_silence(chat))
 
-        self._silence[chat] = self._spawn(wait())
+        self._silence[chat] = self._spawn(wait(), chat)
 
     async def _on_silence(self, chat: str) -> None:
         if self._pending.get(chat):
@@ -208,7 +226,48 @@ class Dispatcher:
         d = await self.engine.store.get(chat)
         if d is None:
             return
-        await self._send(chat, await self.engine.on_silence(chat, d.awaiting_since))
+        stats, started = begin_turn(), time.monotonic()
+        outcome = await self.engine.on_silence(chat, d.awaiting_since)
+        await self._send(chat, outcome)
+        await self._record("silence", chat, outcome, stats, started)
+
+    async def _record(self, kind: str, chat: str, outcome: Outcome, stats, started: float,
+                      msgs: list[IncomingMessage] | None = None, superseded: bool = False) -> None:
+        """One line of the turn log (support_bot/monitoring.py); never breaks the turn."""
+        try:
+            d = await self.engine.store.get(chat)
+            says = [a for a in outcome.actions if isinstance(a, Say)]
+            handoff = any(isinstance(a, HandOff) for a in outcome.actions)
+            MONITOR.turn({
+                "kind": kind,
+                "chat_id": chat,
+                "messages": len(msgs or ()),
+                "language": d.language if d else None,
+                "country": d.country if d else None,
+                "topic": d.issue.category if d and d.current else None,
+                "signal": d.last_signal if d else None,
+                "result": says[-1].result if says else None,
+                "handoff": handoff,
+                "escalation_reason": d.escalation_reason if d and handoff else None,
+                "resolved": any(isinstance(a, Resolve) for a in outcome.actions),
+                "awaiting": d.awaiting if d else None,
+                "superseded": superseded,
+                "silent": not outcome.actions,
+                "latency_ms": round((time.monotonic() - started) * 1000),
+                "llm_calls": stats.llm_calls,
+                "llm_ms": round(stats.llm_ms),
+                "llm_errors": stats.llm_errors,
+                "tokens_in": stats.tokens_in,
+                "tokens_cached": stats.tokens_cached,
+                "tokens_out": stats.tokens_out,
+                "fallbacks": stats.fallbacks,
+                "fact_check_failed": stats.fact_check_failed,
+                "user_text": mask("\n".join(m.text for m in msgs or () if m.text)
+                                  or next((m.variant_id for m in msgs or () if m.variant_id), None)),
+                "bot_text": mask("\n".join(s.text for s in says), 1000),
+            })
+        except Exception:
+            log.exception("chat %s: could not record the turn", chat)
 
     async def _send(self, chat: str, outcome: Outcome) -> None:
         for reaction in to_reactions(chat, outcome.actions, self.tag_map):

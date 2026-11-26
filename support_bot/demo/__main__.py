@@ -1,4 +1,4 @@
-"""python -m support_bot.demo [--port 8000] [--no-browser]"""
+"""python -m support_bot.demo [--host 127.0.0.1] [--port 8000] [--no-browser]"""
 from __future__ import annotations
 
 import argparse
@@ -7,19 +7,22 @@ import webbrowser
 
 import uvicorn
 
+from ..app import llm_provider, setup_logging
 from .server import create_demo_app
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="AI Support Bot local demo")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default="127.0.0.1", help="0.0.0.0 inside Docker")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
+    setup_logging()
     url = f"http://127.0.0.1:{args.port}/demo"
-    print(f"\n  AI Support Bot demo: {url}\n")
+    print(f"\n  AI Support Bot demo: {url}\n  LLM: {llm_provider()} (заглушка, если ключа нет)\n")
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    uvicorn.run(create_demo_app(), host="127.0.0.1", port=args.port, log_level="warning")
+    uvicorn.run(create_demo_app(), host=args.host, port=args.port, proxy_headers=True, forwarded_allow_ips="*", log_level="warning")
 
 
 if __name__ == "__main__":

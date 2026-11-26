@@ -24,9 +24,15 @@ Environment:
                         "*" = all, "" = none (the model reads and writes every language itself)
   PIVOT_TARGET          the language translated messages are handled in: en (default) or ru
 
-  PAYMENT_SILENCE_SECONDS  no answer to "how long ago?" -> L1, default 300 (0 = off)
+  PAYMENT_SILENCE_SECONDS  silence after "how long ago?" -> L1, default 0 = off (test review: silence is not a reason)
+  BOT_MARKDOWN             1 = keep **bold** in replies (only if Consultant renders it), default 0
   CONTACT_MEMORY_HOURS     keep a short note about the previous conversation, default 0 (off)
   RISK_ESCALATES           gambling harm / self-harm -> L1 at once, default 1
+
+  LOG_DIR               write turns-*.jsonl / errors-*.jsonl there (off if unset); LOG_KEEP_DAYS 30
+  LOG_TEXTS             keep user/bot texts in the turn log (long digit runs masked), default 1
+  LOG_LEVEL             INFO; PRICE_INPUT_PER_M / PRICE_CACHED_PER_M / PRICE_OUTPUT_PER_M for the cost estimate
+  Monitoring page: /admin/stats (JSON: /admin/stats.json)
 """
 from __future__ import annotations
 
@@ -37,6 +43,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
 from .consultant.client import HttpConsultantClient
@@ -49,6 +56,7 @@ from .core.personas import PersonaRegistry
 from .core.state import ContactMemory, InMemoryStore
 from .core.translation import LanguagePolicy
 from .dispatcher import Dispatcher
+from .monitoring import MONITOR
 
 log = logging.getLogger(__name__)
 DATA = Path(__file__).resolve().parent / "data"
@@ -84,6 +92,15 @@ def build_app(dispatcher: Dispatcher, webhook_secret: str | None = None) -> Fast
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok"}
+
+    # Monitoring (closed by the nginx password, like the demo).
+    @app.get("/admin/stats", response_class=HTMLResponse, include_in_schema=False)
+    async def admin_stats() -> str:
+        return (Path(__file__).resolve().parent / "admin_stats.html").read_text(encoding="utf-8")
+
+    @app.get("/admin/stats.json", include_in_schema=False)
+    async def admin_stats_json(recent: int = 50) -> dict:
+        return MONITOR.snapshot(recent=max(1, min(recent, 500)))
 
     return app
 
@@ -150,7 +167,8 @@ def build_engine(kb: InMemoryKB, llm=None, translator=None, personas: PersonaReg
         policy = LanguagePolicy()
     memory_hours = float(os.environ.get("CONTACT_MEMORY_HOURS", "0"))
     config = EngineConfig(
-        payment_silence_seconds=float(os.environ.get("PAYMENT_SILENCE_SECONDS", "300")),
+        payment_silence_seconds=float(os.environ.get("PAYMENT_SILENCE_SECONDS", "0")),
+        markdown=_env_bool("BOT_MARKDOWN", False),
         risk_escalates=_env_bool("RISK_ESCALATES", True),
     )
     return Engine(
@@ -166,7 +184,14 @@ def build_engine(kb: InMemoryKB, llm=None, translator=None, personas: PersonaReg
     )
 
 
+def setup_logging() -> None:
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
 def create_app() -> FastAPI:
+    setup_logging()
     kb = InMemoryKB.from_path(Path(os.environ.get("KB_PATH", DATA / "kb.md")))
     engine = build_engine(kb)
     client = HttpConsultantClient(
